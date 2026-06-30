@@ -1,20 +1,15 @@
-# 送迎管理システム v77
+# 送迎管理 本番版 v78
 
-デザイン維持・GAS変更なし版です。
+構成・デザインはv69/v77系を維持し、スマホ表示だけ反映が分かるように調整した版です。
 
-## 重要
-
-このZIPには `gas/Code.gs` を入れていません。
-Google Apps Script側は変更しないでください。
-
-## 上書きするもの
+## 上書き対象
 
 - index.html
+- assets/
 - docs/
-- FEATURE_UPDATE_DESIGN_KEEP_V77_2026-06-30.md
+- README.md
+- FEATURE_UPDATE_MOBILE_VISIBLE_V78_2026-06-30.md
 
-## 方針
+## 注意
 
-- v69の安定していた画面構成を維持
-- v70〜v76の追加ボタン・ポップアップ系の後付け処理は入れない
-- 画面やデザインを大きく変えない
+GASは変更していません。Apps Scriptは触らないでください。

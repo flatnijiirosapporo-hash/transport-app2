@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '本番統合版 1.7.0';
+const APP_VERSION = '本番統合版 1.7.1';
 const STORAGE_KEY = 'nijiiro.transport.settings.v62';
 const CACHE_PREFIX = 'nijiiro.transport.fiscal.';
 const WEEK = ['日','月','火','水','木','金','土'];
