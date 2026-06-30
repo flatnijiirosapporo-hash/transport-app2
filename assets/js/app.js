@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '本番統合版 1.7.1';
+const APP_VERSION = '本番統合版 1.7.0';
 const STORAGE_KEY = 'nijiiro.transport.settings.v62';
 const CACHE_PREFIX = 'nijiiro.transport.fiscal.';
 const WEEK = ['日','月','火','水','木','金','土'];
@@ -627,3 +627,125 @@ function Schedule(){
       : MonthView();
   return `<section class="panel no-print schedule-switch-panel"><div class="schedule-switch-head"><div><h2>予定</h2><p>${labels[state.mode]||'予定'}。週表示は月をまたいでも表示します。</p></div><div class="schedule-switch"><button data-mode="day" class="${state.mode==='day'?'primary':''}">日</button><button data-mode="week" class="${state.mode==='week'?'primary':''}">週</button><button data-mode="month" class="${state.mode==='month'?'primary':''}">月</button></div></div></section>${body}`;
 }
+
+/* v80: schedule day add/edit popup only. Design/GAS unchanged. */
+function routeTables(rows,title){
+  const editable = state.view === 'schedule' && state.mode === 'day';
+  const pickup=rows.filter(activeSchedule).filter(s=>s.pickupTime||s.pickupPlace||s.pickupStaff).sort((a,b)=>(a.pickupTime||'').localeCompare(b.pickupTime||''));
+  const drop=rows.filter(activeSchedule).filter(s=>s.dropoffTime||s.dropoffPlace||s.dropoffStaff).sort((a,b)=>(a.dropoffTime||'').localeCompare(b.dropoffTime||''));
+  const headAction = type => editable ? `<button class="mini-add-btn no-print" data-day-add="${type==='迎え'?'pickup':'dropoff'}" type="button">＋</button>` : '';
+  const table=(type,items)=>{
+    const routeType = type === '迎え' ? 'pickup' : 'dropoff';
+    return `<div class="panel"><div class="panel-head"><div class="panel-title"><h2>${type}</h2><p>${title}</p></div>${headAction(type)}</div><div class="table-wrap"><table class="day-route-table"><thead><tr>${editable?'<th class="edit-col"></th>':''}<th>時間</th><th>児童名</th><th>場所</th><th>担当</th><th>備考</th></tr></thead><tbody>${items.map(s=>`<tr>${editable?`<td class="edit-col"><button class="icon-edit-btn no-print" data-day-edit="${esc(s.id)}" data-route-type="${routeType}" type="button" aria-label="編集">✎</button></td>`:''}<td>${esc(type==='迎え'?s.pickupTime:s.dropoffTime)}</td><td>${esc(s.child)}</td><td>${esc(type==='迎え'?s.pickupPlace:s.dropoffPlace)}</td><td>${esc(type==='迎え'?s.pickupStaff:s.dropoffStaff)}</td><td>${esc(s.note)}</td></tr>`).join('')||`<tr><td colspan="${editable?6:5}">予定なし</td></tr>`}</tbody></table></div></div>`;
+  };
+  return `<div class="split">${table('迎え',pickup)}${table('送り',drop)}</div>`;
+}
+
+function schedulePopupOptions(list, selected, blank='選択'){
+  return `<option value="">${esc(blank)}</option>` + (list||[]).map(x=>`<option value="${esc(x)}" ${x===selected?'selected':''}>${esc(x)}</option>`).join('');
+}
+function childNames(){ return (currentData().masters.children||[]).filter(x=>x.enabled!==false).map(x=>x.displayName).filter(Boolean).sort((a,b)=>a.localeCompare(b,'ja')); }
+function findScheduleForPopup(id){
+  if(!id) return null;
+  const fiscal = state.fiscalData;
+  if(fiscal && fiscal.months){
+    for(const [month, pack] of Object.entries(fiscal.months)){
+      const row = (pack.schedules||[]).find(s=>String(s.id)===String(id));
+      if(row) return { schedule: normalizeSchedule(row), month, pack };
+    }
+  }
+  const row = currentData().schedules.find(s=>String(s.id)===String(id));
+  return row ? { schedule: normalizeSchedule(row), month: state.month, pack: null } : null;
+}
+function openDaySchedulePopup(mode, routeType, scheduleId=''){
+  const found = mode === 'edit' ? findScheduleForPopup(scheduleId) : null;
+  const s = found?.schedule || normalizeSchedule({ id: uid('sch'), date: state.date, status: '予定' });
+  const isPickup = routeType === 'pickup';
+  const typeLabel = isPickup ? '迎え' : '送り';
+  const timeValue = isPickup ? s.pickupTime : s.dropoffTime;
+  const placeValue = isPickup ? s.pickupPlace : s.dropoffPlace;
+  const staffValue = isPickup ? s.pickupStaff : s.dropoffStaff;
+  const childList = childNames();
+  const staffList = staffNames();
+  const placeList = placeNames(isPickup ? 'pickup' : 'dropoff');
+  const modal = document.createElement('div');
+  modal.className = 'schedule-modal-backdrop no-print';
+  modal.innerHTML = `<div class="schedule-modal" role="dialog" aria-modal="true"><div class="schedule-modal-head"><div><h2>${mode==='edit'?'予定を編集':'新規作成'}：${typeLabel}</h2><p>${jpDate(s.date || state.date)}</p></div><button class="modal-close" type="button" data-modal-close>×</button></div><div class="modal-grid"><label class="field">日付<input id="popupDate" type="date" value="${esc(s.date || state.date)}"></label><label class="field">区分<input value="${typeLabel}" readonly></label><label class="field">状態<select id="popupStatus"><option ${s.status==='予定'?'selected':''}>予定</option><option ${s.status==='イベント'?'selected':''}>イベント</option><option ${s.status==='欠席'?'selected':''}>欠席</option></select></label><label class="field">児童名<input id="popupChild" list="popupChildren" value="${esc(s.child)}" placeholder="児童名"></label><label class="field">時間<input id="popupTime" type="time" value="${esc(timeValue)}"></label><label class="field">場所<input id="popupPlace" list="popupPlaces" value="${esc(placeValue)}" placeholder="場所"></label><label class="field">担当<select id="popupStaff">${schedulePopupOptions(staffList, staffValue, '未設定')}</select></label><label class="field modal-note">備考<input id="popupNote" value="${esc(s.note)}" placeholder="備考"></label></div><datalist id="popupChildren">${childList.map(x=>`<option value="${esc(x)}">`).join('')}</datalist><datalist id="popupPlaces">${placeList.map(x=>`<option value="${esc(x)}">`).join('')}</datalist><div class="modal-actions"><button type="button" data-modal-close>キャンセル</button><button type="button" class="primary" id="popupRegister">登録</button></div></div>`;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelectorAll('[data-modal-close]').forEach(b=>b.addEventListener('click', close));
+  modal.addEventListener('click', e=>{ if(e.target === modal) close(); });
+  modal.querySelector('#popupRegister').addEventListener('click', async()=>{
+    try{
+      await registerDaySchedulePopup({ mode, routeType, scheduleId, existing:s });
+      close();
+    }catch(e){ showNotice('登録できません', e.message || String(e), 'bad'); }
+  });
+  modal.querySelector('#popupChild')?.focus();
+}
+async function registerDaySchedulePopup({mode, routeType, scheduleId, existing}){
+  const date = document.getElementById('popupDate')?.value || state.date;
+  const month = date.slice(0,7);
+  const childName = document.getElementById('popupChild')?.value.trim() || '';
+  if(!date) throw new Error('日付を入力してください。');
+  if(!childName) throw new Error('児童名を入力してください。');
+  const child = (currentData().masters.children||[]).find(c=>c.displayName===childName || c.name===childName);
+  const row = mode === 'edit' ? normalizeSchedule(existing) : normalizeSchedule({id:uid('sch'), date, status:'予定'});
+  row.date = date;
+  row.child = childName;
+  row.childId = child?.id || row.childId || '';
+  row.status = document.getElementById('popupStatus')?.value || '予定';
+  row.note = document.getElementById('popupNote')?.value || '';
+  if(routeType === 'pickup'){
+    row.pickupTime = document.getElementById('popupTime')?.value || '';
+    row.pickupPlace = document.getElementById('popupPlace')?.value || '';
+    row.pickupStaff = document.getElementById('popupStaff')?.value || '';
+  }else{
+    row.dropoffTime = document.getElementById('popupTime')?.value || '';
+    row.dropoffPlace = document.getElementById('popupPlace')?.value || '';
+    row.dropoffStaff = document.getElementById('popupStaff')?.value || '';
+  }
+  if(!state.fiscalData) state.fiscalData = normalizeFiscalData({fiscalYear:state.fiscalYear, months:{}, masters:currentData().masters, holidays:currentData().holidays});
+  writeCurrentMonthToFiscal();
+  if(mode === 'edit'){
+    for(const pack of Object.values(state.fiscalData.months||{})){
+      pack.schedules = (pack.schedules||[]).filter(s=>String(s.id)!==String(scheduleId));
+    }
+  }
+  const pack = ensureFiscalMonth(state.fiscalData, month);
+  pack.schedules = pack.schedules || [];
+  pack.schedules.push(row);
+  state.fiscalYear = fiscalYearFromYm(month);
+  state.month = month;
+  state.date = date;
+  setMonthFromFiscal(month);
+  await saveFiscalFromPopup(mode==='edit' ? '変更しました' : '登録しました');
+}
+async function saveFiscalFromPopup(message){
+  if(!configured()){
+    writeCache(state.fiscalYear, state.fiscalData);
+    state.dirty = true;
+    render();
+    showNotice(message, '画面に反映しました。Drive接続後に保存してください。');
+    return;
+  }
+  state.loading=true; render();
+  try{
+    await api.saveFiscalData(state.fiscalYear, state.fiscalData, state.fiscalData?.meta?.version);
+    const fresh=await api.getFiscalData(state.fiscalYear);
+    state.fiscalData=normalizeFiscalData(fresh.data||state.fiscalData);
+    setMonthFromFiscal(state.month);
+    state.dirty=false;
+    state.lastLoaded=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    writeCache(state.fiscalYear,state.fiscalData);
+    showNotice(message, '年度データに保存しました。');
+  }catch(e){ showNotice('保存できませんでした', e.message, 'bad'); }
+  finally{ state.loading=false; render(); }
+}
+
+document.addEventListener('click', e=>{
+  const add = e.target.closest?.('[data-day-add]');
+  if(add){ e.preventDefault(); openDaySchedulePopup('add', add.dataset.dayAdd); return; }
+  const edit = e.target.closest?.('[data-day-edit]');
+  if(edit){ e.preventDefault(); openDaySchedulePopup('edit', edit.dataset.routeType, edit.dataset.dayEdit); }
+});
