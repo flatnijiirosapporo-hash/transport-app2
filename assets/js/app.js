@@ -1,165 +1,629 @@
 'use strict';
 
-const APP_VERSION = '本番再構成版 2.0.0';
-const STORE = 'nijiiro.transport.settings.v76';
-const CACHE = 'nijiiro.transport.fiscal.v76.';
+const APP_VERSION = '本番統合版 1.7.0';
+const STORAGE_KEY = 'nijiiro.transport.settings.v62';
+const CACHE_PREFIX = 'nijiiro.transport.fiscal.';
 const WEEK = ['日','月','火','水','木','金','土'];
 const pad = n => String(n).padStart(2,'0');
-const now = new Date();
-const TODAY = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
-const TODAY_YM = TODAY.slice(0,7);
-const app = document.getElementById('app');
+const today = new Date();
+const todayYmd = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+const todayYm = todayYmd.slice(0,7);
 
+const app = document.getElementById('app');
 const state = {
   view: (location.hash || '#dashboard').replace('#',''),
-  month: TODAY_YM,
-  date: TODAY,
+  month: todayYm,
+  date: todayYmd,
   mode: 'day',
-  fiscalYear: fiscalYearFromYm(TODAY_YM),
-  fiscal: emptyFiscal(fiscalYearFromYm(TODAY_YM)),
-  dataLoaded: false,
+  fiscalYear: fiscalYearFromYm(todayYm),
+  fiscalData: null,
+  data: null,
   loading: false,
   lastLoaded: '',
   notice: null,
-  modal: null,
   autoRefresh: false,
-  filters: {status:'all', child:'', staff:'', range:'month', date:TODAY},
-  staffView: {staff:'', mode:'day', date:TODAY},
-  next: {source:addMonths(TODAY_YM,-1), target:addMonths(TODAY_YM,1), longStart:'', longEnd:'', closedDays:[''], closedPeriods:[{start:'',end:''}], preview:null},
-  selectedDeletes: new Set()
+  dirty: false,
+  filters: { child:'', staff:'', status:'予定', range:'month', date: todayYmd },
+  staffPage: { staff:'', range:'day' },
+  addForms: [{ id: uid('add') }],
+  nextPreview: null,
+  editingStaffId: '',
+  editingChildId: ''
 };
 
-function uid(p='id'){ return `${p}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
-function esc(v){ return String(v ?? '').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
-function ymd(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
-function jpDate(v){ if(!v) return ''; const d=new Date(`${v}T00:00:00`); return `${Number(v.slice(5,7))}/${Number(v.slice(8,10))}（${WEEK[d.getDay()]}）`; }
-function weekday(v){ return WEEK[new Date(`${v}T00:00:00`).getDay()]; }
-function addDays(v,n){ const d=new Date(`${v}T00:00:00`); d.setDate(d.getDate()+n); return ymd(d); }
-function addMonths(ym,n){ const d=new Date(`${ym}-01T00:00:00`); d.setMonth(d.getMonth()+n); return ymd(d).slice(0,7); }
+function uid(prefix='id'){ return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; }
+function esc(v){ return String(v ?? '').replace(/[&<>"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s])); }
+function ymd(date){ return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`; }
+function ymFromDate(date){ return ymd(date).slice(0,7); }
+function jpDate(v){ const d=new Date(`${v}T00:00:00`); return `${Number(v.slice(5,7))}/${Number(v.slice(8,10))}（${WEEK[d.getDay()]}）`; }
+function addMonths(ym, delta){ const d=new Date(`${ym}-01T00:00:00`); d.setMonth(d.getMonth()+delta); return ymd(d).slice(0,7); }
 function fiscalYearFromYm(ym){ const [y,m]=ym.split('-').map(Number); return m>=4 ? y : y-1; }
-function fiscalMonths(fy){ return Array.from({length:12},(_,i)=>{const m=i+4,y=m<=12?fy:fy+1,mm=m<=12?m:m-12;return `${y}-${pad(mm)}`;}); }
+function fiscalMonths(fy){ return Array.from({length:12},(_,i)=>{ const m=i+4; const y=m<=12?fy:fy+1; const mm=m<=12?m:m-12; return `${y}-${pad(mm)}`; }); }
+function fiscalLabel(fy){ return `${fy}年度（${fy}/4〜${fy+1}/3）`; }
 function daysInMonth(ym){ const [y,m]=ym.split('-').map(Number); return new Date(y,m,0).getDate(); }
 function monthDays(ym){ return Array.from({length:daysInMonth(ym)},(_,i)=>`${ym}-${pad(i+1)}`); }
-function weekStart(date){ const d=new Date(`${date}T00:00:00`); d.setDate(d.getDate()-d.getDay()); return ymd(d); }
-function weekDays(date){ const s=weekStart(date); return Array.from({length:7},(_,i)=>addDays(s,i)); }
-function active(s){ return !['欠席','休み','取消','削除'].includes(String(s.status||'')); }
-function statusClass(s){ if(s==='欠席'||s==='休み'||s==='取消') return 'absent'; if(s==='イベント') return 'event'; return ''; }
-function settings(){ try{return JSON.parse(localStorage.getItem(STORE)||'{}')}catch{return {}} }
-function saveSettings(v){ localStorage.setItem(STORE, JSON.stringify(v||{})); }
-function cacheKey(fy){ return CACHE + fy; }
-function writeCache(fy,data){ try{localStorage.setItem(cacheKey(fy), JSON.stringify(data));}catch{} }
-function readCache(fy){ try{return JSON.parse(localStorage.getItem(cacheKey(fy))||'null')}catch{return null} }
-function currentMonthPack(){ ensureFiscalMonth(state.month); return state.fiscal.months[state.month]; }
-function schedulesOfMonth(ym=state.month){ ensureFiscalMonth(ym); return state.fiscal.months[ym].schedules; }
-function schedulesOfDate(date){ return schedulesOfMonth(date.slice(0,7)).filter(s=>s.date===date); }
-function allSchedulesOfFiscal(){ return Object.values(state.fiscal.months||{}).flatMap(m=>m.schedules||[]); }
-function emptyFiscal(fy){ const months={}; fiscalMonths(fy).forEach(m=>months[m]={schedules:[],trips:[],changes:[],logs:[],meta:{}}); return {fiscalYear:fy,meta:{version:0},months,masters:{children:[],staff:[],places:[]},holidays:{items:[]},config:{},logs:[]}; }
-function ensureFiscalMonth(ym){ if(!state.fiscal) state.fiscal = emptyFiscal(fiscalYearFromYm(ym)); if(!state.fiscal.months) state.fiscal.months={}; if(!state.fiscal.months[ym]) state.fiscal.months[ym]={schedules:[],trips:[],changes:[],logs:[],meta:{}}; }
+function getWeekday(date){ return WEEK[new Date(`${date}T00:00:00`).getDay()]; }
+function activeSchedule(s){ return !['欠席','休み','取消','削除'].includes(String(s.status||'')); }
+function getSettings(){ try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch{return{}} }
+function saveSettings(v){ localStorage.setItem(STORAGE_KEY, JSON.stringify(v||{})); }
+function configured(){ const s=getSettings(); return Boolean(s.gasUrl && s.appToken); }
+function cacheKey(fiscalYear){ return CACHE_PREFIX + fiscalYear; }
+function readCache(fiscalYear){ try{return JSON.parse(localStorage.getItem(cacheKey(fiscalYear))||'null')}catch{return null} }
+function writeCache(fiscalYear,data){ try{localStorage.setItem(cacheKey(fiscalYear), JSON.stringify(data));}catch{} }
 
-function normName(o){ return o?.displayName || o?.name || o?.childName || o?.staffName || o?.id || ''; }
-function normalizeSchedule(s={}){ return {...s,id:s.id||uid('sch'),date:s.date||TODAY,weekday:s.weekday||weekday(s.date||TODAY),childId:s.childId||'',child:s.child||s.childName||s.childDisplayName||'',childName:s.childName||s.child||s.childDisplayName||'',status:s.status||'予定',pickupTime:s.pickupTime||'',pickupPlace:s.pickupPlace||'',pickupStaff:s.pickupStaff||s.pickupStaffName||'',pickupStaffName:s.pickupStaffName||s.pickupStaff||'',dropoffTime:s.dropoffTime||'',dropoffPlace:s.dropoffPlace||'',dropoffStaff:s.dropoffStaff||s.dropoffStaffName||'',dropoffStaffName:s.dropoffStaffName||s.dropoffStaff||'',note:s.note||s.memo||''}; }
-function normalizeMasters(m={}){ const children=(m.children||[]).map((c,i)=>({...c,id:c.id||c.childId||`child_${i+1}`,displayName:normName(c),name:c.name||normName(c),enabled:c.enabled!==false && c.active!==false,routes:normalizeRoutes(c)})); const staff=(m.staff||[]).map((s,i)=>({...s,id:s.id||s.staffId||`staff_${i+1}`,displayName:normName(s),name:s.name||normName(s),order:Number(s.order||s.sortOrder||i+1),enabled:s.enabled!==false && s.active!==false})).sort((a,b)=>(a.order-b.order)||a.displayName.localeCompare(b.displayName,'ja')); const places=(m.places||[]).map((p,i)=>({id:p.id||`place_${i+1}`,name:p.name||p.displayName||'',type:p.type||'両方',enabled:p.enabled!==false})).filter(p=>p.name); return {...m,children,staff,places}; }
-function normalizeRoutes(c={}){ if(Array.isArray(c.routes)) return c.routes.map(r=>({...r,enabled:r.enabled!==false})); const routes=[]; const add=(type,mode,time,place,staff)=>{ if(time||place||staff) routes.push({id:uid('route'),type,mode,days:c.usualWeekdays||[],time:time||'',place:place||'',staff:staff||'',enabled:true}); }; add('pickup','normal',c.defaultPickupTime,c.defaultPickupPlace||c.usualPickupPlace,c.defaultPickupStaff); add('dropoff','normal',c.defaultDropoffTime,c.defaultDropoffPlace||c.usualDropoffPlace,c.defaultDropoffStaff); return routes; }
-function normalizeFiscal(raw={}){ const f=raw.fiscal||raw; const fy=Number(f.fiscalYear||state.fiscalYear||fiscalYearFromYm(TODAY_YM)); const fiscal=emptyFiscal(fy); fiscal.meta=f.meta||{version:0}; fiscal.masters=normalizeMasters(f.masters||raw.masters||{}); fiscal.holidays=f.holidays||raw.holidays||{items:[]}; fiscal.config=f.config||raw.config||{}; fiscal.logs=f.logs||[]; Object.entries(f.months||{}).forEach(([ym,pack])=>{ const p=Array.isArray(pack)?{schedules:pack}:pack||{}; fiscal.months[ym]={schedules:(p.schedules?.items||p.schedules||[]).map(normalizeSchedule),trips:p.trips||[],changes:p.changes||[],logs:p.logs||[],meta:p.meta||{}}; }); return fiscal; }
-
-function childOptions(){ return (state.fiscal.masters.children||[]).filter(c=>c.enabled!==false).map(c=>`<option value="${esc(c.displayName)}" data-id="${esc(c.id)}"></option>`).join(''); }
-function staffOptions(){ return (state.fiscal.masters.staff||[]).filter(s=>s.enabled!==false).map(s=>`<option value="${esc(s.displayName)}"></option>`).join(''); }
-function staffSelect(value='', extra=''){ return `<select ${extra}>${[''].concat((state.fiscal.masters.staff||[]).filter(s=>s.enabled!==false).map(s=>s.displayName)).map(v=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(v||'未設定')}</option>`).join('')}</select>`; }
-function childSelect(value='', extra=''){ return `<select ${extra}>${[''].concat((state.fiscal.masters.children||[]).filter(c=>c.enabled!==false).map(c=>c.displayName)).map(v=>`<option value="${esc(v)}" ${v===value?'selected':''}>${esc(v||'選択')}</option>`).join('')}</select>`; }
-function placeList(){ const set=new Set((state.fiscal.masters.places||[]).filter(p=>p.enabled!==false).map(p=>p.name)); allSchedulesOfFiscal().forEach(s=>{ if(s.pickupPlace)set.add(s.pickupPlace); if(s.dropoffPlace)set.add(s.dropoffPlace); }); (state.fiscal.masters.children||[]).forEach(c=>(c.routes||[]).forEach(r=>{if(r.place)set.add(r.place)})); return [...set].sort((a,b)=>a.localeCompare(b,'ja')).map(v=>`<option value="${esc(v)}"></option>`).join(''); }
-
-async function request(action,payload={}){ const s=settings(); if(!s.gasUrl||!s.appToken) throw new Error('データ設定をしてください。'); const res=await fetch(s.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,token:s.appToken,operator:s.operator||'',payload})}); const text=await res.text(); let json; try{json=JSON.parse(text)}catch{throw new Error('GASの応答がJSONではありません。URLと公開設定を確認してください。')} if(!json.ok) throw new Error(json.message||'処理に失敗しました。'); return json.data; }
-const api={ping:()=>request('ping'),setupDrive:()=>request('setupDrive'),getFiscalData:fy=>request('getFiscalData',{fiscalYear:fy}),saveFiscalData:(fy,data)=>request('saveFiscalData',{fiscalYear:fy,data}),importFiscalFromMonths:fy=>request('importFiscalFromMonths',{fiscalYear:fy})};
-
-async function loadFiscal(force=false){ const fy=state.fiscalYear; if(!force){ const c=readCache(fy); if(c){ state.fiscal=normalizeFiscal(c); state.dataLoaded=true; state.lastLoaded='端末保存'; render(); } } if(!settings().gasUrl){ render(); return; } try{ state.loading=true; renderShell(); const data=await api.getFiscalData(fy); state.fiscal=normalizeFiscal(data); state.dataLoaded=true; state.lastLoaded=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'}); writeCache(fy,state.fiscal); showNotice('読み込みました',`年度データを更新しました。`,'ok',1200); }catch(e){ showNotice('読み込みできません',e.message,'err'); }finally{ state.loading=false; render(); } }
-async function saveFiscal(message='保存しました'){ try{ state.loading=true; renderShell(); state.fiscal.meta=state.fiscal.meta||{}; state.fiscal.meta.updatedAt=new Date().toISOString(); const data=await api.saveFiscalData(state.fiscalYear,state.fiscal); state.fiscal.meta.version=(state.fiscal.meta.version||0)+1; writeCache(state.fiscalYear,state.fiscal); state.lastLoaded=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'}); showNotice(message,'年度JSONに保存しました。','ok',1400); }catch(e){ showNotice('保存できませんでした',e.message,'err'); }finally{ state.loading=false; render(); } }
-
-function showNotice(title,msg,type='ok',auto=0){ state.notice={title,msg,type}; renderNotice(); if(auto) setTimeout(()=>{state.notice=null; renderNotice();},auto); }
-function renderNotice(){ document.querySelectorAll('.notice').forEach(e=>e.remove()); if(!state.notice)return; const div=document.createElement('div'); div.className='notice'; div.innerHTML=`<div class="notice-card ${state.notice.type}"><h2>${esc(state.notice.title)}</h2><p>${esc(state.notice.msg||'')}</p><button class="btn primary" data-close-notice>OK</button></div>`; document.body.appendChild(div); }
-
-function navBtn(id,label){ return `<button data-view="${id}" class="${state.view===id?'active':''}">${label}</button>`; }
-function renderShell(){ app.innerHTML=`<div class="app"><div class="header"><div class="head-row"><div><div class="brand">送迎管理</div><div class="version">${APP_VERSION} ${state.loading?'・処理中':''}</div></div><div class="top-controls"><select data-fiscal>${[state.fiscalYear-1,state.fiscalYear,state.fiscalYear+1].map(y=>`<option value="${y}" ${y===state.fiscalYear?'selected':''}>${y}年度</option>`).join('')}</select><input type="month" value="${state.month}" data-month><button class="btn" data-refresh>更新</button><span class="sub">最終更新：${esc(state.lastLoaded||'未読込')}</span></div></div><div class="nav">${navBtn('dashboard','今日')}${navBtn('schedule','予定')}${navBtn('staff','担当')}${navBtn('change','変更')}${navBtn('next','翌月作成')}${navBtn('master','マスタ')}${navBtn('print','印刷')}${navBtn('settings','設定')}</div></div><main id="main"></main><datalist id="childrenList">${childOptions()}</datalist><datalist id="staffList">${staffOptions()}</datalist><datalist id="placeList">${placeList()}</datalist></div>`; }
-function render(){ renderShell(); const main=document.getElementById('main'); const map={dashboard:renderDashboard,schedule:renderSchedule,staff:renderStaff,change:renderChange,next:renderNext,master:renderMaster,print:renderPrint,settings:renderSettings}; main.innerHTML=(map[state.view]||renderDashboard)(); renderNotice(); renderModal(); }
-
-function controlsDateMode(prefix=''){ return `<div class="toolbar"><div class="seg"><button data-mode="day" class="${state.mode==='day'?'active':''}">日</button><button data-mode="week" class="${state.mode==='week'?'active':''}">週</button><button data-mode="month" class="${state.mode==='month'?'active':''}">月</button></div><div class="field"><label>選択日</label><input type="date" value="${state.date}" data-date></div><button class="btn" data-today>今日</button></div>`; }
-function scheduleCard(s,type){ const time=type==='pickup'?s.pickupTime:s.dropoffTime, place=type==='pickup'?s.pickupPlace:s.dropoffPlace, staff=type==='pickup'?s.pickupStaff:s.dropoffStaff; return `<div class="card"><div class="card-row"><button class="edit-btn" title="編集" data-edit="${s.id}">編集</button><div class="time">${esc(time||'--:--')}</div><div><div class="who">${esc(s.child||s.childName||'')}</div><div class="place">${esc(place||'場所未設定')}</div><div class="staff">担当：${esc(staff||'未設定')}</div><div><span class="status ${statusClass(s.status)}">${esc(s.status)}</span>${s.note?` <span class="note">${esc(s.note)}</span>`:''}</div></div></div></div>`; }
-function renderDay(date=state.date){ const list=schedulesOfDate(date).filter(active).sort((a,b)=>(a.pickupTime||a.dropoffTime||'').localeCompare(b.pickupTime||b.dropoffTime||'')); const pickups=list.filter(s=>s.pickupTime||s.pickupPlace||s.pickupStaff); const dropoffs=list.filter(s=>s.dropoffTime||s.dropoffPlace||s.dropoffStaff); const sec=(title,type,items)=>`<div class="panel"><div class="section-head"><h3>${title}</h3><button class="btn add primary" data-add="${type}" data-add-date="${date}">＋ ${title}追加</button></div><div class="cards">${items.length?items.map(s=>scheduleCard(s,type)).join(''):'<div class="empty">予定はありません</div>'}</div></div>`; return `<div class="panel"><div class="day-title"><div><div class="panel-title">${jpDate(date)}</div><div class="sub">迎え ${pickups.length}件・送り ${dropoffs.length}件</div></div></div></div><div class="grid two">${sec('迎え','pickup',pickups)}${sec('送り','dropoff',dropoffs)}</div>`; }
-function renderWeek(date=state.date, filterFn=null){ const days=weekDays(date); return `<div class="panel"><div class="panel-title">週表示 ${jpDate(days[0])}〜${jpDate(days[6])}</div><div class="week-grid">${days.map(d=>{ const items=schedulesOfDate(d).filter(active).filter(s=>!filterFn||filterFn(s)).sort((a,b)=>(a.pickupTime||a.dropoffTime||'').localeCompare(b.pickupTime||b.dropoffTime||'')); return `<div class="week-day"><div class="week-day-head"><span>${jpDate(d)}</span><button class="btn small primary" data-add="pickup" data-add-date="${d}">＋追加</button></div><div class="cards">${items.length?items.map(s=>`${s.pickupTime||s.pickupPlace?scheduleCard(s,'pickup'):''}${s.dropoffTime||s.dropoffPlace?scheduleCard(s,'dropoff'):''}`).join(''):'<div class="mini">予定なし</div>'}</div></div>`; }).join('')}</div></div>`; }
-function renderMonth(ym=state.month, filterFn=null){ const [y,m]=ym.split('-').map(Number); const first=new Date(y,m-1,1); const start=new Date(first); start.setDate(1-first.getDay()); const cells=Array.from({length:42},(_,i)=>{ const d=new Date(start); d.setDate(start.getDate()+i); return ymd(d); }); return `<div class="panel"><div class="panel-title">月表示 ${ym}</div><div class="month-grid">${cells.map(d=>{ const out=d.slice(0,7)!==ym; const items=schedulesOfDate(d).filter(active).filter(s=>!filterFn||filterFn(s)); return `<div class="month-cell ${out?'out':''}" data-jump-date="${d}"><b>${Number(d.slice(8,10))}</b><div class="mini">${items.length}件</div>${items.slice(0,3).map(s=>`<div class="mini">${esc(s.pickupTime||s.dropoffTime||'')} ${esc(s.child||'')}</div>`).join('')}</div>`; }).join('')}</div></div><div class="panel"><div class="panel-title">月一覧</div>${renderListTable(monthDays(ym).flatMap(d=>schedulesOfDate(d)).filter(active).filter(s=>!filterFn||filterFn(s)))}</div>`; }
-function renderDashboard(){ state.mode='day'; return controlsDateMode()+renderDay(state.date); }
-function renderSchedule(){ return controlsDateMode()+ (state.mode==='day'?renderDay(state.date):state.mode==='week'?renderWeek(state.date):renderMonth(state.month)); }
-function renderListTable(list){ if(!list.length)return '<div class="empty">予定はありません</div>'; return `<div class="table-wrap"><table class="table"><thead><tr><th>日付</th><th>区分</th><th>時間</th><th>児童名</th><th>場所</th><th>担当</th><th>状態</th></tr></thead><tbody>${list.map(s=>`${(s.pickupTime||s.pickupPlace||s.pickupStaff)?row(s,'pickup'):''}${(s.dropoffTime||s.dropoffPlace||s.dropoffStaff)?row(s,'dropoff'):''}`).join('')}</tbody></table></div>`; }
-function row(s,type){ const time=type==='pickup'?s.pickupTime:s.dropoffTime, place=type==='pickup'?s.pickupPlace:s.dropoffPlace, staff=type==='pickup'?s.pickupStaff:s.dropoffStaff; return `<tr><td>${jpDate(s.date)}</td><td>${type==='pickup'?'迎え':'送り'}</td><td><button class="edit-btn" data-edit="${s.id}">編集</button> ${esc(time)}</td><td>${esc(s.child)}</td><td>${esc(place)}</td><td>${esc(staff)}</td><td>${esc(s.status)}</td></tr>`; }
-function renderStaff(){ const staff=(state.fiscal.masters.staff||[]).filter(s=>s.enabled!==false); if(!state.staffView.staff&&staff[0]) state.staffView.staff=staff[0].displayName; const match=s=>s.pickupStaff===state.staffView.staff||s.dropoffStaff===state.staffView.staff; const body=state.staffView.mode==='day'?renderStaffDay(match):state.staffView.mode==='week'?renderWeek(state.staffView.date,match):renderMonth(state.month,match); return `<div class="panel"><div class="panel-title">担当一覧</div><div class="toolbar"><div class="field"><label>担当者</label><select data-staff-view>${staff.map(s=>`<option value="${esc(s.displayName)}" ${s.displayName===state.staffView.staff?'selected':''}>${esc(s.displayName)}</option>`).join('')}</select></div><div class="seg"><button data-staff-mode="month" class="${state.staffView.mode==='month'?'active':''}">月</button><button data-staff-mode="day" class="${state.staffView.mode==='day'?'active':''}">日</button><button data-staff-mode="week" class="${state.staffView.mode==='week'?'active':''}">週</button></div><div class="field"><label>選択日</label><input type="date" value="${state.staffView.date}" data-staff-date></div></div></div>${body}`; }
-function renderStaffDay(match){ const list=schedulesOfDate(state.staffView.date).filter(active).filter(match); return `<div class="panel"><div class="panel-title">${jpDate(state.staffView.date)} の担当</div>${renderListTable(list)}</div>`; }
-function renderChange(){ const list=filteredChanges(); return `<div class="panel"><div class="panel-title">変更登録</div><div class="toolbar"><div class="field"><label>状態</label><select data-filter-status><option value="all">すべて</option>${['予定','イベント','欠席'].map(v=>`<option ${state.filters.status===v?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>児童名</label><input value="${esc(state.filters.child)}" data-filter-child placeholder="検索"></div><div class="field"><label>担当</label><input value="${esc(state.filters.staff)}" data-filter-staff list="staffList"></div><div class="field"><label>日付</label><input type="date" value="${state.filters.date}" data-filter-date></div><button class="btn primary" data-add="pickup" data-add-date="${state.filters.date||state.date}">送迎を追加</button><button class="btn danger" data-delete-selected>選択削除</button><button class="btn primary" data-save>保存</button></div></div><div class="panel"><div class="panel-title">一覧</div>${renderChangeTable(list)}</div>`; }
-function filteredChanges(){ return schedulesOfMonth(state.month).filter(s=>{ if(state.filters.status!=='all' && s.status!==state.filters.status)return false; if(state.filters.child && !(s.child||'').includes(state.filters.child))return false; if(state.filters.staff && !(`${s.pickupStaff} ${s.dropoffStaff}`.includes(state.filters.staff)))return false; return true; }).sort((a,b)=>a.date.localeCompare(b.date)||(a.pickupTime||a.dropoffTime||'').localeCompare(b.pickupTime||b.dropoffTime||'')); }
-function renderChangeTable(list){ if(!list.length)return '<div class="empty">予定はありません</div>'; return `<div class="table-wrap"><table class="table"><thead><tr><th><input type="checkbox" data-check-all></th><th>日付</th><th>児童名</th><th>状態</th><th>迎え</th><th>迎え先</th><th>迎え担当</th><th>送り</th><th>送り先</th><th>送り担当</th><th>備考</th></tr></thead><tbody>${list.map(s=>`<tr><td><input type="checkbox" data-row-check="${s.id}" ${state.selectedDeletes.has(s.id)?'checked':''}></td><td><input type="date" value="${s.date}" data-cell="date" data-id="${s.id}"></td><td>${childSelect(s.child,`data-cell="child" data-id="${s.id}"`)}</td><td><select data-cell="status" data-id="${s.id}">${['予定','イベント','欠席'].map(v=>`<option ${s.status===v?'selected':''}>${v}</option>`).join('')}</select></td><td><input value="${esc(s.pickupTime)}" data-cell="pickupTime" data-id="${s.id}"></td><td><input value="${esc(s.pickupPlace)}" list="placeList" data-cell="pickupPlace" data-id="${s.id}"></td><td>${staffSelect(s.pickupStaff,`data-cell="pickupStaff" data-id="${s.id}"`)}</td><td><input value="${esc(s.dropoffTime)}" data-cell="dropoffTime" data-id="${s.id}"></td><td><input value="${esc(s.dropoffPlace)}" list="placeList" data-cell="dropoffPlace" data-id="${s.id}"></td><td>${staffSelect(s.dropoffStaff,`data-cell="dropoffStaff" data-id="${s.id}"`)}</td><td><input value="${esc(s.note)}" data-cell="note" data-id="${s.id}"></td></tr>`).join('')}</tbody></table></div>`; }
-function renderNext(){ const n=state.next; return `<div class="panel"><div class="panel-title">翌月作成</div><div class="grid two"><div class="field"><label>コピー元月</label><input type="month" value="${n.source}" data-next-source></div><div class="field"><label>作成月</label><input type="month" value="${n.target}" data-next-target></div><div class="field"><label>長期休み開始</label><input type="date" value="${n.longStart}" data-next-long-start></div><div class="field"><label>長期休み終了</label><input type="date" value="${n.longEnd}" data-next-long-end></div></div><div class="panel-title" style="margin-top:12px">事業所休業日</div><div class="grid two">${Array.from({length:10},(_,i)=>`<div class="field"><label>休業日 ${i+1}</label><input type="date" value="${n.closedDays[i]||''}" data-closed-day="${i}"></div>`).join('')}</div><div class="panel-title" style="margin-top:12px">休業期間</div><div class="grid two">${Array.from({length:3},(_,i)=>`<div class="field"><label>開始 ${i+1}</label><input type="date" value="${n.closedPeriods[i]?.start||''}" data-closed-start="${i}"></div><div class="field"><label>終了 ${i+1}</label><input type="date" value="${n.closedPeriods[i]?.end||''}" data-closed-end="${i}"></div>`).join('')}</div><div class="toolbar"><button class="btn" data-next-preview>作成前確認</button><button class="btn primary" data-next-create>作成する</button></div></div>${n.preview?`<div class="panel"><div class="panel-title">作成前確認</div>${renderListTable(n.preview)}</div>`:''}`; }
-function renderMaster(){ const m=state.fiscal.masters; return `<div class="panel"><div class="panel-title">マスタ</div><div class="toolbar"><button class="btn" data-export="children">児童CSV出力</button><button class="btn" data-export="staff">担当者CSV出力</button><button class="btn" data-export="routes">送迎CSV出力</button><label class="btn">CSV取込<input type="file" accept=".csv,text/csv" data-import style="display:none"></label><button class="btn primary" data-save>Driveへ保存</button></div></div><div class="grid two"><div class="panel"><div class="panel-title">児童マスタ</div>${masterChildren(m.children||[])}</div><div class="panel"><div class="panel-title">担当者マスタ</div>${masterStaff(m.staff||[])}</div></div>`; }
-function masterChildren(list){ return `<div class="cards">${list.map(c=>`<div class="card"><div class="grid two"><div class="field"><label>児童名</label><input value="${esc(c.displayName)}" data-master-child-name="${c.id}"></div><div class="field"><label>状態</label><select data-master-child-enabled="${c.id}"><option value="true" ${c.enabled!==false?'selected':''}>表示</option><option value="false" ${c.enabled===false?'selected':''}>非表示</option></select></div></div></div>`).join('')}</div><button class="btn full" data-add-child>児童を追加</button>`; }
-function masterStaff(list){ return `<div class="cards">${list.map(s=>`<div class="card"><div class="grid three"><div class="field"><label>担当者名</label><input value="${esc(s.displayName)}" data-master-staff-name="${s.id}"></div><div class="field"><label>表示順</label><input type="number" value="${esc(s.order||'')}" data-master-staff-order="${s.id}"></div><div class="field"><label>状態</label><select data-master-staff-enabled="${s.id}"><option value="true" ${s.enabled!==false?'selected':''}>表示</option><option value="false" ${s.enabled===false?'selected':''}>非表示</option></select></div></div></div>`).join('')}</div><button class="btn full" data-add-staff>担当者を追加</button>`; }
-function renderPrint(){ const totals={}; schedulesOfMonth(state.month).filter(active).forEach(s=>{ [['pickup',s.pickupStaff],['dropoff',s.dropoffStaff]].forEach(([type,name])=>{ if(!name)return; totals[name]=totals[name]||{pickupDays:new Set(),dropoffDays:new Set(),pickupCount:0,dropoffCount:0}; if(type==='pickup'){totals[name].pickupDays.add(s.date);totals[name].pickupCount++;}else{totals[name].dropoffDays.add(s.date);totals[name].dropoffCount++;} }); }); const rows=Object.entries(totals).map(([name,t])=>`<tr><td>${esc(name)}</td><td>${new Set([...t.pickupDays,...t.dropoffDays]).size}</td><td>${t.pickupDays.size}</td><td>${t.dropoffDays.size}</td><td>${t.pickupCount}</td><td>${t.dropoffCount}</td><td></td></tr>`).join(''); return `<div class="panel"><div class="panel-title">印刷 ${state.month}</div><button class="btn primary" onclick="window.print()">印刷</button></div><div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>担当者</th><th>合計日数</th><th>迎え日数</th><th>送り日数</th><th>迎え児童数</th><th>送り児童数</th><th>確認</th></tr></thead><tbody>${rows||'<tr><td colspan="7">予定はありません</td></tr>'}</tbody></table></div></div>`; }
-function renderSettings(){ const s=settings(); return `<div class="panel"><div class="panel-title">データ設定</div><div class="grid"><div class="field"><label>GAS WebアプリURL</label><input value="${esc(s.gasUrl||'')}" data-setting="gasUrl"></div><div class="field"><label>認証トークン</label><input value="${esc(s.appToken||'')}" data-setting="appToken"></div><div class="field"><label>操作者名</label><input value="${esc(s.operator||'')}" data-setting="operator"></div></div><div class="toolbar"><button class="btn primary" data-save-settings>保存</button><button class="btn" data-test>接続確認</button><button class="btn" data-setup-drive>Drive初期設定</button><button class="btn" data-import-fiscal>月別データから年度作成</button></div><p class="sub">自動更新は初期OFFです。必要な時は更新ボタンを押してください。</p></div>`; }
-
-function openScheduleModal(kind,date,id){ const s=id?findSchedule(id):{id:'',date:date||state.date,status:'予定',child:'',pickupTime:'',pickupPlace:'',pickupStaff:'',dropoffTime:'',dropoffPlace:'',dropoffStaff:'',note:''}; state.modal={type:'schedule',kind,id,s}; renderModal(); }
-function findSchedule(id){ return allSchedulesOfFiscal().find(s=>s.id===id); }
-function renderModal(){ document.querySelectorAll('.modal-back').forEach(e=>e.remove()); if(!state.modal)return; const m=state.modal; let html=''; if(m.type==='schedule') html=scheduleModal(m); const div=document.createElement('div'); div.className='modal-back'; div.innerHTML=html; document.body.appendChild(div); }
-function scheduleModal(m){ const s=m.s||{}; const title=m.id?'予定を変更':'予定を追加'; return `<div class="modal"><div class="modal-head"><div class="modal-title">${title}</div><button class="btn" data-close-modal>閉じる</button></div><div class="grid two"><div class="field"><label>日付</label><input type="date" value="${s.date||state.date}" data-modal="date"></div><div class="field"><label>状態</label><select data-modal="status">${['予定','イベント','欠席'].map(v=>`<option ${s.status===v?'selected':''}>${v}</option>`).join('')}</select></div><div class="field"><label>児童名</label>${childSelect(s.child,'data-modal="child"')}</div><div class="field"><label>区分</label><select data-modal="kind"><option value="pickup" ${m.kind==='pickup'?'selected':''}>迎え</option><option value="dropoff" ${m.kind==='dropoff'?'selected':''}>送り</option><option value="both" ${m.kind==='both'?'selected':''}>両方</option></select></div><div class="field"><label>迎え時間</label><input value="${esc(s.pickupTime||'')}" data-modal="pickupTime"></div><div class="field"><label>迎え先</label><input value="${esc(s.pickupPlace||'')}" list="placeList" data-modal="pickupPlace"></div><div class="field"><label>迎え担当</label>${staffSelect(s.pickupStaff,'data-modal="pickupStaff"')}</div><div></div><div class="field"><label>送り時間</label><input value="${esc(s.dropoffTime||'')}" data-modal="dropoffTime"></div><div class="field"><label>送り先</label><input value="${esc(s.dropoffPlace||'')}" list="placeList" data-modal="dropoffPlace"></div><div class="field"><label>送り担当</label>${staffSelect(s.dropoffStaff,'data-modal="dropoffStaff"')}</div><div></div><div class="field" style="grid-column:1/-1"><label>備考</label><textarea data-modal="note">${esc(s.note||'')}</textarea></div></div><div class="toolbar"><button class="btn primary" data-save-schedule>${m.id?'変更を保存':'追加して保存'}</button>${m.id?`<button class="btn danger" data-delete-schedule="${m.id}">削除</button>`:''}</div></div>`; }
-function collectModal(){ const obj={}; document.querySelectorAll('[data-modal]').forEach(el=>obj[el.dataset.modal]=el.value); const child=(state.fiscal.masters.children||[]).find(c=>c.displayName===obj.child); return {...obj,childId:child?.id||'',childName:obj.child,weekday:weekday(obj.date)}; }
-async function saveModalSchedule(){ const m=state.modal; const obj=collectModal(); ensureFiscalMonth(obj.date.slice(0,7)); let list=schedulesOfMonth(obj.date.slice(0,7)); if(m.id){ const old=findSchedule(m.id); if(old && old.date.slice(0,7)!==obj.date.slice(0,7)){ const oldList=schedulesOfMonth(old.date.slice(0,7)); oldList.splice(oldList.findIndex(x=>x.id===m.id),1); list.push({...old,...obj}); } else { const i=list.findIndex(x=>x.id===m.id); if(i>=0) list[i]={...list[i],...obj}; } } else { list.push(normalizeSchedule({id:uid('sch'),...obj})); } state.month=obj.date.slice(0,7); state.date=obj.date; state.modal=null; await saveFiscal(m.id?'変更しました':'追加しました'); }
-async function deleteSchedule(id){ const s=findSchedule(id); if(!s)return; const list=schedulesOfMonth(s.date.slice(0,7)); const i=list.findIndex(x=>x.id===id); if(i>=0) list.splice(i,1); state.modal=null; await saveFiscal('削除しました'); }
-
-function createNextPreview(){ const n=state.next; ensureFiscalMonth(n.source); ensureFiscalMonth(n.target); const src=schedulesOfMonth(n.source).filter(active); const targetDays=monthDays(n.target); const closed=closedSet(); const long=(d)=>n.longStart&&n.longEnd&&d>=n.longStart&&d<=n.longEnd; const byChildWeek={}; src.forEach(s=>{ const k=`${s.child}|${weekday(s.date)}`; byChildWeek[k]=s; }); const out=[]; targetDays.forEach(d=>{ if(closed.has(d))return; const w=weekday(d); Object.values(byChildWeek).filter(s=>weekday(s.date)===w).forEach(base=>{ const child=(state.fiscal.masters.children||[]).find(c=>c.displayName===base.child); const rPick=routeFor(child,'pickup',long(d)?'longHoliday':'normal',w); const rDrop=routeFor(child,'dropoff',long(d)?'longHoliday':'normal',w); out.push(normalizeSchedule({...base,id:uid('sch'),date:d,weekday:w,status:'予定',pickupTime:rPick?.time||base.pickupTime,pickupPlace:rPick?.place||base.pickupPlace,pickupStaff:rPick?.staff||base.pickupStaff,dropoffTime:rDrop?.time||base.dropoffTime,dropoffPlace:rDrop?.place||base.dropoffPlace,dropoffStaff:rDrop?.staff||base.dropoffStaff,note:''})); }); }); state.next.preview=out; }
-function routeFor(child,type,mode,w){ if(!child)return null; const list=(child.routes||[]).filter(r=>r.enabled!==false&&r.type===type&&(r.mode===mode||(!r.mode&&mode==='normal'))); return list.find(r=>(r.days||[]).includes(w)) || list[0] || null; }
-function closedSet(){ const n=state.next,set=new Set((n.closedDays||[]).filter(Boolean)); (n.closedPeriods||[]).forEach(p=>{ if(p.start&&p.end){ for(let d=p.start; d<=p.end; d=addDays(d,1)) set.add(d); } }); return set; }
-async function createNext(){ createNextPreview(); ensureFiscalMonth(state.next.target); const closed=closedSet(); const target=schedulesOfMonth(state.next.target).filter(s=>!closed.has(s.date)); const existingKeys=new Set(target.map(s=>`${s.date}|${s.child}`)); state.next.preview.forEach(s=>{ if(!existingKeys.has(`${s.date}|${s.child}`)) target.push(s); }); state.fiscal.months[state.next.target].schedules=target.sort((a,b)=>a.date.localeCompare(b.date)); state.month=state.next.target; state.date=`${state.month}-01`; await saveFiscal('翌月を作成しました'); }
-
-function csvEscape(v){ const s=String(v??''); return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s; }
-function download(name,text){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
-function exportCsv(kind){ let rows=[]; if(kind==='staff'){ rows=[['id','displayName','order','enabled'],...(state.fiscal.masters.staff||[]).map(s=>[s.id,s.displayName,s.order,s.enabled!==false])]; } else if(kind==='children'){ rows=[['id','displayName','enabled'],...(state.fiscal.masters.children||[]).map(c=>[c.id,c.displayName,c.enabled!==false])]; } else { rows=[['child','type','mode','days','time','place','staff','enabled'],...(state.fiscal.masters.children||[]).flatMap(c=>(c.routes||[]).map(r=>[c.displayName,r.type,r.mode,(r.days||[]).join(''),r.time,r.place,r.staff,r.enabled!==false]))]; } download(`${kind}.csv`, rows.map(r=>r.map(csvEscape).join(',')).join('\n')); }
-
-
-function parseCsv(text){
-  const rows=[]; let row=[], cur='', q=false;
-  for(let i=0;i<text.length;i++){
-    const ch=text[i], nx=text[i+1];
-    if(q && ch==='"' && nx==='"'){ cur+='"'; i++; continue; }
-    if(ch==='"'){ q=!q; continue; }
-    if(!q && ch===','){ row.push(cur); cur=''; continue; }
-    if(!q && (ch==='\n'||ch==='\r')){ if(ch==='\r'&&nx==='\n')i++; row.push(cur); if(row.some(x=>x!=='')) rows.push(row); row=[]; cur=''; continue; }
-    cur+=ch;
-  }
-  row.push(cur); if(row.some(x=>x!=='')) rows.push(row);
-  return rows;
+function normalizeName(o){ return o?.displayName || o?.name || o?.childName || o?.staffName || o?.id || ''; }
+function normalizeMasters(m={}){
+  const children=(m.children||[]).map((c,i)=>({
+    ...c,
+    id:c.id||c.childId||`child_${i+1}`,
+    displayName:normalizeName(c),
+    enabled:c.enabled!==false && c.active!==false,
+    routes:normalizeRoutes(c)
+  }));
+  const staff=(m.staff||[]).map((s,i)=>({
+    ...s,
+    id:s.id||s.staffId||`staff_${i+1}`,
+    displayName:normalizeName(s),
+    role:s.role||'',
+    order:Number(s.order||s.sortOrder||999),
+    canDrive:Boolean(s.canDrive||s.drive),
+    canRide:Boolean(s.canRide||s.ride||s.canSupport),
+    enabled:s.enabled!==false && s.active!==false
+  })).sort((a,b)=>(a.order-b.order)||a.displayName.localeCompare(b.displayName,'ja'));
+  const places=(m.places||[]).map((p,i)=>({...p,id:p.id||`place_${i+1}`,name:p.name||p.displayName||'',type:p.type||'両方',enabled:p.enabled!==false}));
+  return {...m,children,staff,places};
 }
-function importCsvFile(file){
-  const reader=new FileReader();
-  reader.onload=()=>{
-    const rows=parseCsv(String(reader.result||''));
-    if(rows.length<2){ showNotice('取込できません','CSVにデータがありません。','err'); return; }
-    const head=rows[0].map(x=>x.trim());
-    const has=(v)=>head.includes(v);
-    if(has('displayName') && has('order')){
-      const idx=Object.fromEntries(head.map((h,i)=>[h,i]));
-      state.fiscal.masters.staff=rows.slice(1).map((r,i)=>({id:r[idx.id]||uid('staff'),displayName:r[idx.displayName]||'',name:r[idx.displayName]||'',order:Number(r[idx.order]||i+1),enabled:String(r[idx.enabled]||'true')!=='false'}));
-      render(); showNotice('取込しました','担当者マスタを取り込みました。Driveへ保存してください。','ok');
-    } else if(has('displayName')){
-      const idx=Object.fromEntries(head.map((h,i)=>[h,i]));
-      state.fiscal.masters.children=rows.slice(1).map((r,i)=>({id:r[idx.id]||uid('child'),displayName:r[idx.displayName]||'',name:r[idx.displayName]||'',enabled:String(r[idx.enabled]||'true')!=='false',routes:[]}));
-      render(); showNotice('取込しました','児童マスタを取り込みました。Driveへ保存してください。','ok');
-    } else {
-      showNotice('取込できません','CSVの見出しが対応していません。','err');
-    }
+function normalizeRoutes(c){
+  if(Array.isArray(c.routes)) return c.routes;
+  const routes=[];
+  const add=(type,mode,text)=>parseRouteText(text).forEach(r=>routes.push({type,mode,...r,enabled:true}));
+  add('pickup','normal', c.normalPickup || c.usualPickup || c.defaultPickup || line(c.defaultPickupTime,c.defaultPickupPlace,c.defaultPickupStaff));
+  add('dropoff','normal', c.normalDropoff || c.usualDropoff || c.defaultDropoff || line(c.defaultDropoffTime,c.defaultDropoffPlace,c.defaultDropoffStaff));
+  add('pickup','longHoliday', c.longHolidayPickup || c.holidayPickup || c.longPickup);
+  add('dropoff','longHoliday', c.longHolidayDropoff || c.holidayDropoff || c.longDropoff);
+  add('pickup','event', c.eventPickup);
+  add('dropoff','event', c.eventDropoff);
+  return routes;
+}
+function line(time,place,staff){ return [time,place,staff].filter(Boolean).join('|'); }
+function parseRouteText(text){
+  if(Array.isArray(text)) return text;
+  return String(text||'').split(/\n+/).map(x=>x.trim()).filter(Boolean).map(row=>{
+    const p=row.includes('|')?row.split('|').map(x=>x.trim()):row.split(/\s+/);
+    return {days:p[0]?.match(/^[月火水木金土日]+$/)?p[0].split(''):[], time:p[0]?.match(/^\d{1,2}:\d{2}$/)?p[0]:(p[1]?.match(/^\d{1,2}:\d{2}$/)?p[1]:''), place:p[0]?.match(/^\d{1,2}:\d{2}$/)?(p[1]||''):(p[2]||p[1]||''), staff:p[0]?.match(/^\d{1,2}:\d{2}$/)?(p[2]||''):(p[3]||''), note:p.slice(4).join(' ')};
+  });
+}
+function routeText(child,type,mode){
+  return (child.routes||[]).filter(r=>r.type===type&&r.mode===mode&&r.enabled!==false).map(r=>`${(r.days||[]).join('')}|${r.time||''}|${r.place||''}|${r.staff||''}|${r.note||''}`.replace(/^\|/,'')).join('\n');
+}
+function normalizeSchedule(s={}){ return {
+  ...s,
+  id:s.id||uid('sch'),
+  child:s.child||s.childName||s.childDisplayName||s.name||'',
+  childId:s.childId||'',
+  status:s.status||'予定',
+  pickupTime:s.pickupTime||s.pickupAt||'',
+  pickupPlace:s.pickupPlace||s.from||s.fromPlace||'',
+  pickupStaff:s.pickupStaff||s.pickupStaffName||'',
+  dropoffTime:s.dropoffTime||s.dropoffAt||'',
+  dropoffPlace:s.dropoffPlace||s.to||s.toPlace||'',
+  dropoffStaff:s.dropoffStaff||s.dropoffStaffName||'',
+  note:s.note||s.memo||''
+}; }
+function normalizeData(raw={}){
+  const masters=normalizeMasters(raw.masters||{});
+  const schedules=(raw.schedules?.items||raw.schedules||[]).map(normalizeSchedule).map(s=>{
+    const c=masters.children.find(x=>x.id===s.childId || x.displayName===s.child);
+    return {...s, childId:s.childId||c?.id||'', child:s.child||c?.displayName||''};
+  });
+  return {
+    meta:raw.meta||raw.schedules?.meta||{},
+    masters,
+    holidays:raw.holidays||{items:[]},
+    schedules,
+    trips:raw.trips?.items||raw.trips||[],
+    changes:raw.changes?.items||raw.changes||[],
+    logs:raw.logs?.items||raw.logs||[],
+    config:raw.config||{},
+    backups:raw.backups||[]
   };
-  reader.readAsText(file,'UTF-8');
+}
+function normalizeFiscalData(raw={}){
+  const source = raw.fiscal || raw;
+  const masters = normalizeMasters(raw.masters || source.masters || {});
+  const holidays = raw.holidays || source.holidays || {items:[]};
+  const config = raw.config || source.config || {};
+  const months = {};
+  Object.entries(source.months || {}).forEach(([month, val])=>{
+    const pack = Array.isArray(val) ? {schedules:val} : (val || {});
+    months[month] = {
+      schedules:(pack.schedules?.items || pack.schedules || []).map(normalizeSchedule),
+      trips:pack.trips?.items || pack.trips || [],
+      changes:pack.changes?.items || pack.changes || [],
+      logs:pack.logs?.items || pack.logs || [],
+      meta:pack.meta || {}
+    };
+  });
+  return {
+    meta:source.meta || {},
+    fiscalYear:Number(source.fiscalYear || state?.fiscalYear || fiscalYearFromYm(todayYm)),
+    months,
+    masters,
+    holidays,
+    config,
+    logs:source.logs || []
+  };
+}
+function ensureFiscalMonth(fiscal, month){
+  fiscal.months = fiscal.months || {};
+  if(!fiscal.months[month]) fiscal.months[month] = {schedules:[],trips:[],changes:[],logs:[],meta:{}};
+  return fiscal.months[month];
+}
+function setMonthFromFiscal(month){
+  const fiscal = state.fiscalData || normalizeFiscalData({fiscalYear:state.fiscalYear,months:{},masters:{children:[],staff:[],places:[]}});
+  const pack = ensureFiscalMonth(fiscal, month);
+  const raw = {
+    meta: pack.meta || fiscal.meta || {},
+    masters: fiscal.masters,
+    holidays: fiscal.holidays,
+    config: fiscal.config,
+    schedules: pack.schedules || [],
+    trips: pack.trips || [],
+    changes: pack.changes || [],
+    logs: pack.logs || []
+  };
+  state.month = month;
+  state.fiscalYear = fiscalYearFromYm(month);
+  state.data = normalizeData(raw);
+}
+function writeCurrentMonthToFiscal(){
+  if(!state.fiscalData) state.fiscalData = normalizeFiscalData({fiscalYear:state.fiscalYear,months:{},masters:{children:[],staff:[],places:[]}});
+  const d = currentData();
+  state.fiscalData.masters = d.masters;
+  state.fiscalData.holidays = d.holidays;
+  state.fiscalData.config = d.config;
+  state.fiscalData.months[state.month] = {
+    schedules:d.schedules || [],
+    trips:d.trips || [],
+    changes:d.changes || [],
+    logs:d.logs || [],
+    meta:d.meta || {}
+  };
+  return state.fiscalData;
+}
+function currentData(){ return state.data || normalizeData({masters:{children:[],staff:[],places:[]},schedules:[]}); }
+
+async function request(action,payload={}){
+  const s=getSettings();
+  if(!s.gasUrl || !s.appToken) throw new Error('データ設定をしてください。');
+  const res=await fetch(s.gasUrl,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,token:s.appToken,operator:s.operator||'未設定',payload})});
+  const text=await res.text();
+  let json; try{json=JSON.parse(text)}catch{throw new Error('GASの応答を読み取れません。URLと公開設定を確認してください。')}
+  if(!json.ok) throw new Error(json.message||'処理に失敗しました。');
+  return json;
+}
+const api={
+  ping:()=>request('ping'),
+  setupDrive:()=>request('setupDrive'),
+  getFiscalData:(fiscalYear)=>request('getFiscalData',{fiscalYear}),
+  saveFiscalData:(fiscalYear,data,expectedVersion)=>request('saveFiscalData',{fiscalYear,data,expectedVersion}),
+  importFiscalFromMonths:(fiscalYear)=>request('importFiscalFromMonths',{fiscalYear}),
+  getMonthData:(month)=>request('getMonthData',{month}),
+  saveMonthData:(month,data,expectedVersion)=>request('saveMonthData',{month,data,expectedVersion}),
+  saveMasters:(masters,expectedVersion)=>request('saveMasters',{masters,expectedVersion}),
+  createBackup:(target,month)=>request('createBackup',{target,month})
+};
+
+function showNotice(title,message,type='ok'){ state.notice={title,message,type}; renderNotice(); }
+function closeNotice(){ state.notice=null; renderNotice(); }
+function renderNotice(){
+  document.querySelectorAll('.notice').forEach(e=>e.remove());
+  if(!state.notice) return;
+  const div=document.createElement('div'); div.className='notice';
+  div.innerHTML=`<div class="notice-card"><h2>${esc(state.notice.title)}</h2><p>${esc(state.notice.message)}</p><button class="primary" id="closeNotice">閉じる</button></div>`;
+  document.body.appendChild(div); document.getElementById('closeNotice').onclick=closeNotice;
+}
+async function loadFiscal(fiscalYear=state.fiscalYear,{force=false,silent=false,month=state.month}={}){
+  state.fiscalYear=Number(fiscalYear);
+  const months=fiscalMonths(state.fiscalYear);
+  if(!months.includes(month)) month=months[0];
+  state.month=month;
+  state.date = state.date?.startsWith(month) ? state.date : `${month}-01`;
+  const cached=readCache(state.fiscalYear);
+  if(cached && !force){
+    state.fiscalData=normalizeFiscalData(cached);
+    setMonthFromFiscal(month);
+    state.lastLoaded='一時保存データ';
+    render();
+  }
+  if(!configured()) { if(!cached) render(); return; }
+  state.loading=true; render();
+  try{
+    const r=await api.getFiscalData(state.fiscalYear);
+    const fiscal=normalizeFiscalData(r.data||{});
+    state.fiscalData=fiscal;
+    setMonthFromFiscal(month);
+    state.lastLoaded=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    state.dirty=false;
+    writeCache(state.fiscalYear,fiscal);
+    if(!silent) showNotice('読み込みました', `${fiscalLabel(state.fiscalYear)} を読み込みました。月切替は画面内で行います。`);
+  }catch(e){ showNotice('読み込みできません', e.message, 'bad'); }
+  finally{ state.loading=false; render(); }
+}
+async function loadMonth(month=state.month,{force=false,silent=false}={}){
+  const fy=fiscalYearFromYm(month);
+  if(fy!==state.fiscalYear || !state.fiscalData || force){ return loadFiscal(fy,{force, silent, month}); }
+  state.month=month;
+  state.date = state.date?.startsWith(month) ? state.date : `${month}-01`;
+  setMonthFromFiscal(month);
+  render();
+  if(!silent) showNotice('表示しました', `${month} を表示しました。Drive再読み込みはしていません。`);
+}
+async function saveCurrentMonth(message='保存しました'){
+  writeCurrentMonthToFiscal();
+  const fiscal=state.fiscalData;
+  state.loading=true; render();
+  try{
+    await api.saveFiscalData(state.fiscalYear, fiscal, fiscal.meta?.version);
+    const fresh=await api.getFiscalData(state.fiscalYear);
+    state.fiscalData=normalizeFiscalData(fresh.data||fiscal);
+    setMonthFromFiscal(state.month);
+    state.dirty=false;
+    state.lastLoaded=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    writeCache(state.fiscalYear,state.fiscalData);
+    showNotice(message,'年度データに保存しました。月切替はそのまま表示できます。');
+  }catch(e){ showNotice('保存できませんでした', e.message, 'bad'); }
+  finally{ state.loading=false; render(); }
+}
+async function saveMasters(){
+  const d=currentData();
+  writeCurrentMonthToFiscal();
+  state.fiscalData.masters=d.masters;
+  state.loading=true; render();
+  try{
+    await api.saveMasters(d.masters, d.masters?.meta?.version);
+    await api.saveFiscalData(state.fiscalYear, state.fiscalData, state.fiscalData.meta?.version);
+    await loadFiscal(state.fiscalYear,{force:true,silent:true,month:state.month});
+    showNotice('保存しました','マスタと年度データを保存しました。');
+  }catch(e){ showNotice('保存できませんでした', e.message, 'bad'); }
+  finally{ state.loading=false; render(); }
+}
+async function importCurrentFiscal(){
+  state.loading=true; render();
+  try{
+    const r=await api.importFiscalFromMonths(state.fiscalYear);
+    state.fiscalData=normalizeFiscalData(r.data||{});
+    setMonthFromFiscal(state.month);
+    writeCache(state.fiscalYear,state.fiscalData);
+    showNotice('取込しました', `${fiscalLabel(state.fiscalYear)} を既存の月別データから作成しました。`);
+  }catch(e){ showNotice('取込できません', e.message, 'bad'); }
+  finally{ state.loading=false; render(); }
+}
+function Header(){
+  const nav=[['dashboard','今日'],['schedule','予定'],['staff','担当'],['changes','変更登録'],['next','翌月作成'],['masters','マスタ'],['print','印刷'],['settings','設定']];
+  return `<div class="topbar"><div class="topbar-inner"><div class="brand"><h1>送迎管理</h1><small>${APP_VERSION} ／ ${fiscalLabel(state.fiscalYear)} ／ 最終更新：${esc(state.lastLoaded||'未取得')} ／ 自動更新：${state.autoRefresh?'ON':'OFF'}</small></div><div class="top-actions no-print"><button id="reloadBtn" class="primary">更新</button><button id="autoBtn">自動更新 ${state.autoRefresh?'ON':'OFF'}</button></div></div><div class="mobile-view-switch no-print"><label>画面<select id="mobileViewSelect">${nav.map(([k,l])=>`<option value="${k}" ${state.view===k?'selected':''}>${l}</option>`).join('')}</select></label></div><div class="nav no-print">${nav.map(([k,l])=>`<button data-view="${k}" class="${state.view===k?'active':''}">${l}</button>`).join('')}</div></div>`;
+}
+function MonthBar(){ const months=fiscalMonths(state.fiscalYear); return `<div class="monthbar no-print"><label>年度<input id="fiscalInput" type="number" value="${esc(state.fiscalYear)}" min="2020" max="2100"></label><button id="applyFiscal">年度読込</button><button id="prevMonth">前月</button><label>表示月<select id="monthInput">${months.map(m=>`<option value="${m}" ${m===state.month?'selected':''}>${m}</option>`).join('')}</select></label><button id="applyMonth">この月を表示</button><button id="nextMonth">翌月</button><label>日付<input id="dateInput" type="date" value="${esc(state.date)}"></label>${state.loading?'<span class="badge warn">読み込み中</span>':''}</div>`; }
+function Layout(body){ return `<div class="app-shell">${Header()}${MonthBar()}<main class="container">${body}</main></div>`; }
+function Metric(label,value,sub){ return `<div class="metric"><small>${esc(label)}</small><strong>${esc(value)}</strong><small>${esc(sub||'')}</small></div>`; }
+function Dashboard(){
+  const d=currentData(); const todayRows=d.schedules.filter(s=>s.date===state.date); const active=todayRows.filter(activeSchedule);
+  const unset=active.filter(s=>!s.pickupStaff || !s.dropoffStaff).length; const notes=todayRows.filter(s=>s.note).length;
+  return `<section class="grid">${Metric('利用予定',`${active.length}名`,jpDate(state.date))}${Metric('迎え',`${active.filter(s=>s.pickupTime||s.pickupPlace).length}件`,'予定データ基準')}${Metric('送り',`${active.filter(s=>s.dropoffTime||s.dropoffPlace).length}件`,'予定データ基準')}${Metric('担当未設定',`${unset}件`,'確認が必要')}${Metric('備考あり',`${notes}件`,'注意事項')}</section>${routeTables(todayRows,'今日の予定')}`;
+}
+function routeTables(rows,title){
+  const pickup=rows.filter(activeSchedule).filter(s=>s.pickupTime||s.pickupPlace||s.pickupStaff).sort((a,b)=>(a.pickupTime||'').localeCompare(b.pickupTime||''));
+  const drop=rows.filter(activeSchedule).filter(s=>s.dropoffTime||s.dropoffPlace||s.dropoffStaff).sort((a,b)=>(a.dropoffTime||'').localeCompare(b.dropoffTime||''));
+  const table=(type,items)=>`<div class="panel"><div class="panel-head"><div class="panel-title"><h2>${type}</h2><p>${title}</p></div></div><div class="table-wrap"><table><thead><tr><th>時間</th><th>児童名</th><th>場所</th><th>担当</th><th>備考</th></tr></thead><tbody>${items.map(s=>`<tr><td>${esc(type==='迎え'?s.pickupTime:s.dropoffTime)}</td><td>${esc(s.child)}</td><td>${esc(type==='迎え'?s.pickupPlace:s.dropoffPlace)}</td><td>${esc(type==='迎え'?s.pickupStaff:s.dropoffStaff)}</td><td>${esc(s.note)}</td></tr>`).join('')||'<tr><td colspan="5">予定なし</td></tr>'}</tbody></table></div></div>`;
+  return `<div class="split">${table('迎え',pickup)}${table('送り',drop)}</div>`;
+}
+function Schedule(){
+  const d=currentData();
+  const body=state.mode==='day'?routeTables(d.schedules.filter(s=>s.date===state.date),`${jpDate(state.date)}`):state.mode==='week'?WeekView():MonthView();
+  return `<section class="panel no-print"><div class="segmented schedule-mode-tabs"><button data-mode="day" class="${state.mode==='day'?'primary':''}">日</button><button data-mode="week" class="${state.mode==='week'?'primary':''}">週</button><button data-mode="month" class="${state.mode==='month'?'primary':''}">月</button></div></section>${body}`;
+}
+function WeekView(){ const start=new Date(`${state.date}T00:00:00`); start.setDate(start.getDate()-start.getDay()); const days=Array.from({length:7},(_,i)=>{const x=new Date(start);x.setDate(start.getDate()+i);return ymd(x)}); return `<section class="panel"><div class="grid">${days.map(day=>{const rows=currentData().schedules.filter(s=>s.date===day&&activeSchedule(s));return `<button data-day="${day}" class="ghost"><strong>${jpDate(day)}</strong><br><span class="subtle">${rows.length}名</span></button>`}).join('')}</div></section>${routeTables(currentData().schedules.filter(s=>s.date===state.date),jpDate(state.date))}`; }
+function MonthView(){ const days=monthDays(state.month); return `<section class="panel"><div class="grid">${days.map(day=>{const rows=currentData().schedules.filter(s=>s.date===day&&activeSchedule(s)); return `<button data-day="${day}" class="ghost"><strong>${jpDate(day)}</strong><br><span class="subtle">${rows.length}名</span></button>`}).join('')}</div></section>`; }
+function rangeLabel(range){ return range==='day' ? jpDate(state.date) : range==='week' ? '選択日の週' : `${state.month}`; }
+function staffEventsForRows(rows, staffName){
+  const list=[];
+  rows.filter(activeSchedule).forEach(s=>{
+    if((!staffName || s.pickupStaff===staffName) && (s.pickupTime || s.pickupPlace || s.pickupStaff)){
+      list.push({date:s.date,type:'迎え',time:s.pickupTime||'',child:s.child||'',place:s.pickupPlace||'',staff:s.pickupStaff||'',note:s.note||'',status:s.status||'予定'});
+    }
+    if((!staffName || s.dropoffStaff===staffName) && (s.dropoffTime || s.dropoffPlace || s.dropoffStaff)){
+      list.push({date:s.date,type:'送り',time:s.dropoffTime||'',child:s.child||'',place:s.dropoffPlace||'',staff:s.dropoffStaff||'',note:s.note||'',status:s.status||'予定'});
+    }
+  });
+  return list.filter(x=>x.staff).sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.time||'').localeCompare(b.time||'')||a.type.localeCompare(b.type,'ja')||(a.child||'').localeCompare(b.child||'','ja'));
+}
+function staffTargetRows(staffName, range){
+  if(range==='day') return staffEventsForRows(rowsForDateAnyMonth(state.date), staffName);
+  if(range==='week') return staffEventsForRows(weekDatesFor(state.date).flatMap(day=>rowsForDateAnyMonth(day)), staffName);
+  return staffEventsForRows(rowsForMonthAny(state.month), staffName);
+}
+function StaffView(){
+  const masterStaff=staffNames();
+  if(!state.staffPage.staff && masterStaff.length) state.staffPage.staff=masterStaff[0];
+  const selected=state.staffPage.staff;
+  const range=state.staffPage.range || 'day';
+  const rows=staffTargetRows(selected, range);
+  const pickup=rows.filter(r=>r.type==='迎え');
+  const drop=rows.filter(r=>r.type==='送り');
+  const days=new Set(rows.map(r=>r.date));
+  const title=range==='day' ? jpDate(state.date) : range==='week' ? `${jpDate(weekDatesFor(state.date)[0])} 〜 ${jpDate(weekDatesFor(state.date)[6])}` : state.month;
+  const body=range==='day' ? StaffDayView(rows) : range==='week' ? StaffWeekCalendar(selected) : StaffMonthCalendar(selected);
+  return `<section class="panel no-print"><div class="panel-head"><div class="panel-title"><h2>担当</h2><p>担当者マスタから選択し、担当になっている予定だけ表示します。</p></div></div><div class="toolbar staff-filter"><label class="field">担当者<select id="staffPageStaff">${options(masterStaff,selected,'担当者を選択')}</select></label><label class="field">選択日<input id="staffDate" type="date" value="${esc(state.date)}"></label><label class="field">表示月<select id="staffMonthInput">${fiscalMonths(state.fiscalYear).map(m=>`<option value="${m}" ${m===state.month?'selected':''}>${m}</option>`).join('')}</select></label><div class="segmented staff-mode-tabs"><button data-staff-range="day" class="${range==='day'?'primary':''}">日</button><button data-staff-range="week" class="${range==='week'?'primary':''}">週</button><button data-staff-range="month" class="${range==='month'?'primary':''}">月</button></div></div></section><section class="grid">${Metric('担当日数',`${days.size}日`,title)}${Metric('迎え',`${pickup.length}件`,selected||'全員')}${Metric('送り',`${drop.length}件`,selected||'全員')}${Metric('合計',`${rows.length}件`,'迎え＋送り')}</section>${body}`;
+}
+function StaffDayView(rows){
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>日別担当一覧</h2><p>${jpDate(state.date)}</p></div></div>${StaffDetailTable(rows)}</section>`;
+}
+function StaffWeekCalendar(staffName){
+  const days=weekDatesFor(state.date);
+  const allEvents=staffTargetRows(staffName,'week');
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>週表示</h2><p>選択日を含む週を表示します。月をまたいでも両方の予定を表示します。</p></div><span class="badge">${allEvents.length}件</span></div><div class="week-calendar"><div class="week-head-row">${days.map(day=>{const events=staffEventsForRows(rowsForDateAnyMonth(day), staffName); return `<button data-day="${day}" class="week-head ${day===state.date?'selected':''}"><strong>${jpDate(day)}</strong><span>${events.length}件</span></button>`;}).join('')}</div><div class="week-body">${days.map(day=>{const events=staffEventsForRows(rowsForDateAnyMonth(day), staffName); return `<div class="week-col ${day===state.date?'selected':''}">${events.map(compactEventCard).join('')||'<div class="empty-mini">担当なし</div>'}</div>`;}).join('')}</div></div></section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>週一覧</h2><p>担当予定を一覧で確認できます。</p></div></div>${StaffDetailTable(allEvents)}</section>`;
+}
+function StaffMonthCalendar(staffName){
+  const days=calendarDays(state.month);
+  const monthEvents=staffTargetRows(staffName,'month');
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>月表示</h2><p>${state.month} の担当予定をカレンダーと一覧で表示します。</p></div><span class="badge">${monthEvents.length}件</span></div><div class="month-calendar"><div class="weekday-row">${WEEK.map(w=>`<div>${w}</div>`).join('')}</div><div class="month-grid">${days.map(day=>{const inMonth=day.startsWith(state.month); const events=staffEventsForRows(rowsForDateAnyMonth(day), staffName); const shown=events.slice(0,3); return `<button data-day="${day}" class="month-day ${inMonth?'':'outside'} ${day===state.date?'selected':''}"><div class="day-title"><strong>${Number(day.slice(8,10))}</strong><span>${inMonth?`${events.length}件`:day.slice(5,7)+'月'}</span></div>${shown.map(e=>`<div class="mini-event ${e.type==='迎え'?'pickup':'dropoff'}"><span>${esc(e.time||'--:--')}</span>${esc(e.type)} ${esc(e.child)}</div>`).join('')}${events.length>3?`<div class="more-event">ほか ${events.length-3}件</div>`:''}</button>`;}).join('')}</div></div></section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>月一覧</h2><p>担当予定を一覧で確認できます。</p></div></div>${StaffDetailTable(monthEvents)}</section>`;
+}
+function StaffDetailTable(rows){
+  return `<div class="table-wrap"><table id="staffDetailTable" class="compact-table"><thead><tr><th>日付</th><th>区分</th><th>時間</th><th>児童名</th><th>場所</th><th>担当</th><th>状態</th><th>備考</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(jpDate(r.date))}</td><td><span class="badge ${r.type==='迎え'?'ok':'warn'}">${esc(r.type)}</span></td><td>${esc(r.time)}</td><td>${esc(r.child)}</td><td>${esc(r.place)}</td><td>${esc(r.staff)}</td><td>${esc(r.status)}</td><td>${esc(r.note)}</td></tr>`).join('')||'<tr><td colspan="8">担当予定はありません。</td></tr>'}</tbody></table></div>`;
+}
+function options(list,value='',empty='選択なし'){ return `<option value="">${empty}</option>${list.map(v=>`<option ${v===value?'selected':''}>${esc(v)}</option>`).join('')}`; }
+function childNames(){ return currentData().masters.children.filter(c=>c.enabled!==false).map(c=>c.displayName).filter(Boolean); }
+function staffNames(){ return currentData().masters.staff.filter(s=>s.enabled!==false).map(s=>s.displayName).filter(Boolean); }
+function placeNames(type){
+  const d=currentData(); const a=[];
+  d.schedules.forEach(s=>{ if(type!=='dropoff') a.push(s.pickupPlace); if(type!=='pickup') a.push(s.dropoffPlace); });
+  d.masters.places.forEach(p=>{ if(p.enabled!==false && (p.type==='両方'||p.type===type||!p.type)) a.push(p.name); });
+  d.masters.children.forEach(c=> (c.routes||[]).filter(r=>r.type===type||type==='both').forEach(r=>a.push(r.place)) );
+  return [...new Set(a.filter(Boolean))].sort((x,y)=>x.localeCompare(y,'ja'));
+}
+function AddForms(){ return state.addForms.map((f,i)=>`<div class="add-box" data-add-form="${f.id}"><div class="toolbar"><label class="field">日付<input data-add="date" type="date" value="${esc(state.date)}"></label><label class="field">児童名<select data-add="child">${options(childNames(),'','児童名')}</select></label><label class="field">状態<select data-add="status"><option>予定</option><option>イベント</option><option>欠席</option></select></label><label class="field">送迎区分<select data-add="type"><option>迎え</option><option>送り</option></select></label><label class="field">時間<input data-add="time" type="time"></label><label class="field">場所<input data-add="place" list="allPlaces"></label><label class="field">担当<select data-add="staff">${options(staffNames())}</select></label><label class="field">備考<input data-add="note"></label>${i>0?`<button data-remove-add="${f.id}" class="danger">入力欄を削除</button>`:''}</div></div>`).join(''); }
+function Changes(){
+  const rows=filterChangeRows();
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>変更登録</h2><p>予定の変更・追加・削除をまとめて保存します。</p></div></div><div class="tabs segmented no-print"><button data-status="予定" class="${state.filters.status==='予定'?'active':''}">予定</button><button data-status="イベント" class="${state.filters.status==='イベント'?'active':''}">イベント</button><button data-status="欠席" class="${state.filters.status==='欠席'?'active':''}">欠席</button></div><div class="toolbar no-print" style="margin-top:10px"><label class="field">児童名<input id="filterChild" value="${esc(state.filters.child)}" placeholder="児童名で検索"></label><label class="field">担当者<select id="filterStaff">${options(staffNames(),state.filters.staff,'全員')}</select></label><label class="field">表示範囲<select id="filterRange"><option value="month" ${state.filters.range==='month'?'selected':''}>月全体</option><option value="day" ${state.filters.range==='day'?'selected':''}>日付</option><option value="week" ${state.filters.range==='week'?'selected':''}>1週間</option></select></label><label class="field">日付<input id="filterDate" type="date" value="${esc(state.filters.date)}"></label><button id="reloadBtn2">再読み込み</button><button id="deleteChecked" class="danger">削除</button></div></section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>送迎を追加</h2><p>初期は1件。増やす場合だけ入力欄を追加します。</p></div><button id="addFormBtn" class="primary">入力欄を追加</button></div>${AddForms()}<datalist id="allPlaces">${placeNames('both').map(p=>`<option value="${esc(p)}">`).join('')}</datalist><button id="addSchedules" class="primary">画面に追加</button></section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>予定一覧</h2><p>変更後、最後に保存してください。</p></div><div class="toolbar no-print"><button id="selectVisible">表示中を全選択</button><button id="clearChecked">選択解除</button><button id="saveSchedules" class="primary">保存する</button></div></div>${ScheduleEditTable(rows)}</section>`;
+}
+function filterChangeRows(){
+  let rows=currentData().schedules.filter(s=>s.date?.startsWith(state.month));
+  if(state.filters.status) rows=rows.filter(s=>s.status===state.filters.status);
+  if(state.filters.child) rows=rows.filter(s=>String(s.child).includes(state.filters.child));
+  if(state.filters.staff) rows=rows.filter(s=>s.pickupStaff===state.filters.staff||s.dropoffStaff===state.filters.staff);
+  if(state.filters.range==='day') rows=rows.filter(s=>s.date===state.filters.date);
+  if(state.filters.range==='week') { const base=new Date(`${state.filters.date}T00:00:00`); const start=new Date(base); start.setDate(base.getDate()-base.getDay()); const end=new Date(start); end.setDate(start.getDate()+6); rows=rows.filter(s=>{const d=new Date(`${s.date}T00:00:00`); return d>=start&&d<=end;}); }
+  return rows.sort((a,b)=>(a.date+a.child).localeCompare(b.date+b.child,'ja'));
+}
+function ScheduleEditTable(rows){ return `<div class="table-wrap"><table id="changeTable"><thead><tr><th>削除</th><th>日付</th><th>児童名</th><th>状態</th><th>迎え時間</th><th>迎え先</th><th>迎え担当</th><th>送り時間</th><th>送り先</th><th>送り担当</th><th>備考</th></tr></thead><tbody>${rows.map(s=>`<tr data-id="${esc(s.id)}"><td><input type="checkbox" data-del></td><td><input type="date" data-field="date" value="${esc(s.date)}"></td><td><input data-field="child" value="${esc(s.child)}"></td><td><select data-field="status"><option ${s.status==='予定'?'selected':''}>予定</option><option ${s.status==='イベント'?'selected':''}>イベント</option><option ${s.status==='欠席'?'selected':''}>欠席</option></select></td><td><input type="time" data-field="pickupTime" value="${esc(s.pickupTime)}"></td><td><input data-field="pickupPlace" list="pickupPlaces" value="${esc(s.pickupPlace)}"></td><td><select data-field="pickupStaff">${options(staffNames(),s.pickupStaff)}</select></td><td><input type="time" data-field="dropoffTime" value="${esc(s.dropoffTime)}"></td><td><input data-field="dropoffPlace" list="dropoffPlaces" value="${esc(s.dropoffPlace)}"></td><td><select data-field="dropoffStaff">${options(staffNames(),s.dropoffStaff)}</select></td><td><input data-field="note" value="${esc(s.note)}"></td></tr>`).join('')||'<tr><td colspan="11">表示する予定がありません。</td></tr>'}</tbody></table></div><datalist id="pickupPlaces">${placeNames('pickup').map(p=>`<option value="${esc(p)}">`).join('')}</datalist><datalist id="dropoffPlaces">${placeNames('dropoff').map(p=>`<option value="${esc(p)}">`).join('')}</datalist>`; }
+function collectScheduleRows(){
+  const d=currentData(); const map=new Map(d.schedules.map(s=>[s.id,{...s}]));
+  document.querySelectorAll('#changeTable tbody tr[data-id]').forEach(tr=>{
+    const id=tr.dataset.id; const item=map.get(id)||{id};
+    if(tr.querySelector('[data-del]')?.checked){ map.delete(id); return; }
+    tr.querySelectorAll('[data-field]').forEach(el=>item[el.dataset.field]=el.value);
+    const child=currentData().masters.children.find(c=>c.displayName===item.child); item.childId=child?.id||item.childId||'';
+    map.set(id,item);
+  });
+  d.schedules=[...map.values()].filter(s=>s.date&&s.child);
+  state.dirty=true; return d;
+}
+function addSchedulesFromForms(){
+  const d=currentData(); let added=0;
+  document.querySelectorAll('[data-add-form]').forEach(box=>{
+    const val=k=>box.querySelector(`[data-add="${k}"]`)?.value||'';
+    if(!val('date')||!val('child')) return;
+    const type=val('type'), child=d.masters.children.find(c=>c.displayName===val('child'));
+    const item={id:uid('sch'),date:val('date'),child:val('child'),childId:child?.id||'',status:val('status'),pickupTime:'',pickupPlace:'',pickupStaff:'',dropoffTime:'',dropoffPlace:'',dropoffStaff:'',note:val('note')};
+    if(type==='迎え'){ item.pickupTime=val('time'); item.pickupPlace=val('place'); item.pickupStaff=val('staff'); }
+    else { item.dropoffTime=val('time'); item.dropoffPlace=val('place'); item.dropoffStaff=val('staff'); }
+    d.schedules.push(item); added++;
+  });
+  if(added){ state.data=d; state.dirty=true; showNotice('追加しました', `${added}件を画面に追加しました。最後に保存してください。`); }
+  else showNotice('追加できません','日付と児童名を入力してください。','bad');
+}
+function NextMonth(){
+  const target=addMonths(state.month,1), source=state.month;
+  const form=(i,prefix,label)=>`<div class="toolbar"><label class="field">${label}${i+1} 開始<input type="date" id="${prefix}Start${i}"></label><label class="field">${label}${i+1} 終了<input type="date" id="${prefix}End${i}"></label></div>`;
+  const days=Array.from({length:10},(_,i)=>`<label class="field">休業日${i+1}<input type="date" id="closedDay${i}"></label>`).join('');
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>翌月作成</h2><p>条件入力は保存不要です。必要な項目だけ入力してください。</p></div></div><div class="toolbar"><label class="field">コピー元月<input id="sourceMonth" type="month" value="${esc(source)}"></label><label class="field">作成月<input id="targetMonth" type="month" value="${esc(target)}"></label></div></section><section class="panel"><div class="panel-title"><h2>長期休み期間</h2><p>期間内は送迎マスタの長期休み候補を優先します。</p></div>${form(0,'long','長期休み')}<div class="toolbar no-print"><button id="longAll">作成月全体を長期休みにする</button><button id="clearLong">クリア</button></div></section><section class="panel"><div class="panel-title"><h2>事業所休業日</h2><p>選択された日は予定を作成しません。</p></div><div class="grid">${days}</div><h3>休業期間</h3>${[0,1,2].map(i=>form(i,'closed','休業期間')).join('')}</section><section class="panel"><div class="toolbar"><button id="previewNext" class="primary">作成前確認</button><button id="createNext" class="primary">翌月を作成</button></div>${state.nextPreview?PreviewNext():''}</section>`;
+}
+function readPeriods(prefix,count){ const out=[]; for(let i=0;i<count;i++){const s=document.getElementById(`${prefix}Start${i}`)?.value, e=document.getElementById(`${prefix}End${i}`)?.value; if(s&&e) out.push({start:s,end:e}); } return out; }
+function inPeriods(date,periods){ return periods.some(p=>date>=p.start && date<=p.end); }
+function selectedClosedDays(){ const days=[]; for(let i=0;i<10;i++){ const v=document.getElementById(`closedDay${i}`)?.value; if(v) days.push(v); } return days; }
+async function buildNextPreview(){
+  const sourceMonth=document.getElementById('sourceMonth').value, targetMonth=document.getElementById('targetMonth').value;
+  const sourceData = (sourceMonth===state.month && fiscalYearFromYm(sourceMonth)===state.fiscalYear) ? currentData() : (()=>{ const fiscal=state.fiscalData; const pack=fiscal?.months?.[sourceMonth]; return normalizeData({masters:fiscal?.masters||currentData().masters,holidays:fiscal?.holidays||currentData().holidays,config:fiscal?.config||{},schedules:pack?.schedules||[],trips:pack?.trips||[],changes:pack?.changes||[],logs:pack?.logs||[]}); })();
+  const longPeriods=readPeriods('long',1), closedPeriods=readPeriods('closed',3), closedDays=selectedClosedDays();
+  const sourceActive=sourceData.schedules.filter(activeSchedule);
+  const byChild={};
+  const staffByChildWeek={};
+  sourceActive.forEach(s=>{
+    const wd=getWeekday(s.date);
+    byChild[s.child]=byChild[s.child]||new Set();
+    byChild[s.child].add(wd);
+    const key=`${s.child}|${wd}`;
+    staffByChildWeek[key]=staffByChildWeek[key]||{pickupStaff:'',dropoffStaff:''};
+    if(s.pickupStaff) staffByChildWeek[key].pickupStaff=s.pickupStaff;
+    if(s.dropoffStaff) staffByChildWeek[key].dropoffStaff=s.dropoffStaff;
+  });
+  const targetRows=[];
+  monthDays(targetMonth).forEach(day=>{
+    if(closedDays.includes(day)||inPeriods(day,closedPeriods)) return;
+    const wd=getWeekday(day); const mode=inPeriods(day,longPeriods)?'longHoliday':'normal';
+    Object.entries(byChild).forEach(([childName,set])=>{
+      if(!set.has(wd)) return;
+      const child=sourceData.masters.children.find(c=>c.displayName===childName);
+      const p=bestRoute(child,'pickup',mode,wd), dr=bestRoute(child,'dropoff',mode,wd);
+      const staff=staffByChildWeek[`${childName}|${wd}`]||{};
+      targetRows.push({
+        id:uid('sch'),date:day,child:childName,childId:child?.id||'',status:'予定',
+        pickupTime:p.time||'',pickupPlace:p.place||'',pickupStaff:p.staff||staff.pickupStaff||'',
+        dropoffTime:dr.time||'',dropoffPlace:dr.place||'',dropoffStaff:dr.staff||staff.dropoffStaff||'',
+        note:mode==='longHoliday'?'長期休み':''
+      });
+    });
+  });
+  state.nextPreview={sourceMonth,targetMonth,rows:targetRows,longPeriods,closedDays,closedPeriods}; render();
+}
+function bestRoute(child,type,mode,wd){ if(!child) return {}; const routes=(child.routes||[]).filter(r=>r.type===type && r.enabled!==false); const exact=routes.find(r=>r.mode===mode && (!(r.days||[]).length || r.days.includes(wd))); if(exact) return exact; return routes.find(r=>r.mode==='normal' && (!(r.days||[]).length || r.days.includes(wd))) || {}; }
+function PreviewNext(){ const p=state.nextPreview; return `<div class="subtle">${p.targetMonth} 作成予定：${p.rows.length}件 ／ 休業日：${p.closedDays.length}日</div><div class="table-wrap"><table><thead><tr><th>日付</th><th>児童名</th><th>迎え</th><th>迎え担当</th><th>送り</th><th>送り担当</th><th>備考</th></tr></thead><tbody>${p.rows.slice(0,80).map(s=>`<tr><td>${s.date}</td><td>${esc(s.child)}</td><td>${esc(s.pickupTime)} ${esc(s.pickupPlace)}</td><td>${esc(s.pickupStaff)}</td><td>${esc(s.dropoffTime)} ${esc(s.dropoffPlace)}</td><td>${esc(s.dropoffStaff)}</td><td>${esc(s.note)}</td></tr>`).join('')}</tbody></table></div>`; }
+async function createNextMonth(){
+  if(!state.nextPreview) await buildNextPreview();
+  const p=state.nextPreview; const targetFy=fiscalYearFromYm(p.targetMonth);
+  if(targetFy!==state.fiscalYear){ await loadFiscal(targetFy,{force:true,silent:true,month:p.targetMonth}); }
+  let targetPack=ensureFiscalMonth(state.fiscalData, p.targetMonth);
+  let target=normalizeData({masters:state.fiscalData.masters, holidays:state.fiscalData.holidays, config:state.fiscalData.config, schedules:targetPack.schedules||[], trips:targetPack.trips||[], changes:targetPack.changes||[], logs:targetPack.logs||[], meta:targetPack.meta||{}});
+  const closed=new Set(p.closedDays); p.closedPeriods.forEach(period=>monthDays(p.targetMonth).filter(d=>d>=period.start&&d<=period.end).forEach(d=>closed.add(d)));
+  target.schedules=target.schedules.filter(s=>!closed.has(s.date));
+  const key=s=>`${s.date}|${s.child}`; const existing=new Set(target.schedules.map(key));
+  p.rows.forEach(r=>{ if(!existing.has(key(r))) target.schedules.push(r); });
+  state.loading=true; render();
+  try{ state.fiscalData.months[p.targetMonth]={schedules:target.schedules,trips:target.trips,changes:target.changes,logs:target.logs,meta:target.meta||{}}; await api.saveFiscalData(state.fiscalYear,state.fiscalData,state.fiscalData.meta?.version); state.month=p.targetMonth; state.date=`${p.targetMonth}-01`; await loadFiscal(state.fiscalYear,{force:true,silent:true,month:p.targetMonth}); state.view='changes'; location.hash='changes'; showNotice('作成しました',`${p.targetMonth} の予定を年度データに作成しました。`); }
+  catch(e){ showNotice('作成できませんでした',e.message,'bad'); }
+  finally{ state.loading=false; render(); }
+}
+function Masters(){ return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>マスタ</h2><p>CSVで入出力できます。取り込み後は保存してください。</p></div></div><div class="toolbar"><button id="exportTransport">送迎マスタCSV出力</button><button id="importTransportBtn">送迎マスタCSV取込</button><button id="exportStaff">担当者マスタCSV出力</button><button id="importStaffBtn">担当者マスタCSV取込</button><button id="saveMastersBtn" class="primary">Driveへマスタ保存</button><input id="csvFile" type="file" accept=".csv,text/csv" class="hide"></div></section>${TransportMaster()}${StaffMaster()}`; }
+function TransportMaster(){ const rows=currentData().masters.children; return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>送迎マスタ変更</h2><p>通常・長期休み・イベントを分けて登録します。</p></div><button id="addChild" class="primary">児童を追加</button></div><div class="table-wrap"><table id="childTable"><thead><tr><th>児童名</th><th>通常迎え</th><th>通常送り</th><th>長期休み迎え</th><th>長期休み送り</th><th>イベント迎え</th><th>イベント送り</th><th>状態</th></tr></thead><tbody>${rows.map(c=>`<tr data-child-id="${esc(c.id)}"><td><input data-c="displayName" value="${esc(c.displayName)}"></td><td><textarea data-c="normalPickup">${esc(routeText(c,'pickup','normal'))}</textarea></td><td><textarea data-c="normalDropoff">${esc(routeText(c,'dropoff','normal'))}</textarea></td><td><textarea data-c="longHolidayPickup">${esc(routeText(c,'pickup','longHoliday'))}</textarea></td><td><textarea data-c="longHolidayDropoff">${esc(routeText(c,'dropoff','longHoliday'))}</textarea></td><td><textarea data-c="eventPickup">${esc(routeText(c,'pickup','event'))}</textarea></td><td><textarea data-c="eventDropoff">${esc(routeText(c,'dropoff','event'))}</textarea></td><td><select data-c="enabled"><option value="true" ${c.enabled?'selected':''}>有効</option><option value="false" ${!c.enabled?'selected':''}>非表示</option></select></td></tr>`).join('')}</tbody></table></div><p class="subtle">入力例：月水金|14:20|澄川小学校|担当者名</p></section>`; }
+function StaffMaster(){ const rows=currentData().masters.staff; return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>担当者マスタ変更・複製・削除</h2><p>削除は非表示扱いです。</p></div><button id="addStaff" class="primary">担当者を追加</button></div><div class="table-wrap"><table id="staffTable"><thead><tr><th>担当者名</th><th>役割</th><th>表示順</th><th>運転</th><th>添乗</th><th>状態</th><th>操作</th></tr></thead><tbody>${rows.map(s=>`<tr data-staff-id="${esc(s.id)}"><td><input data-s="displayName" value="${esc(s.displayName)}"></td><td><input data-s="role" value="${esc(s.role)}"></td><td><input data-s="order" type="number" value="${esc(s.order)}"></td><td><select data-s="canDrive"><option value="true" ${s.canDrive?'selected':''}>可</option><option value="false" ${!s.canDrive?'selected':''}>不可</option></select></td><td><select data-s="canRide"><option value="true" ${s.canRide?'selected':''}>可</option><option value="false" ${!s.canRide?'selected':''}>不可</option></select></td><td><select data-s="enabled"><option value="true" ${s.enabled?'selected':''}>有効</option><option value="false" ${!s.enabled?'selected':''}>非表示</option></select></td><td><button data-copy-staff="${esc(s.id)}">複製</button><button data-hide-staff="${esc(s.id)}" class="danger">削除</button></td></tr>`).join('')}</tbody></table></div></section>`; }
+function collectMasters(){
+  const d=currentData(); const children=[];
+  document.querySelectorAll('#childTable tbody tr').forEach(tr=>{ const v=k=>tr.querySelector(`[data-c="${k}"]`)?.value||''; const child={id:tr.dataset.childId||uid('child'),displayName:v('displayName'),name:v('displayName'),enabled:v('enabled')!=='false'}; child.routes=[...parseRouteText(v('normalPickup')).map(r=>({...r,type:'pickup',mode:'normal',enabled:true})),...parseRouteText(v('normalDropoff')).map(r=>({...r,type:'dropoff',mode:'normal',enabled:true})),...parseRouteText(v('longHolidayPickup')).map(r=>({...r,type:'pickup',mode:'longHoliday',enabled:true})),...parseRouteText(v('longHolidayDropoff')).map(r=>({...r,type:'dropoff',mode:'longHoliday',enabled:true})),...parseRouteText(v('eventPickup')).map(r=>({...r,type:'pickup',mode:'event',enabled:true})),...parseRouteText(v('eventDropoff')).map(r=>({...r,type:'dropoff',mode:'event',enabled:true}))]; if(child.displayName) children.push(child); });
+  const staff=[]; document.querySelectorAll('#staffTable tbody tr').forEach(tr=>{ const v=k=>tr.querySelector(`[data-s="${k}"]`)?.value||''; const item={id:tr.dataset.staffId||uid('staff'),displayName:v('displayName'),name:v('displayName'),role:v('role'),order:Number(v('order')||999),canDrive:v('canDrive')==='true',canRide:v('canRide')==='true',enabled:v('enabled')!=='false'}; if(item.displayName) staff.push(item); });
+  d.masters={...d.masters,children,staff}; state.data=d; state.dirty=true; return d.masters;
+}
+function csvEscape(v){ const s=String(v??''); return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s; }
+function download(name,text){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})); a.download=name; a.click(); URL.revokeObjectURL(a.href); }
+function exportTransport(){ const d=collectMasters(); const head=['児童名','通常迎え','通常送り','長期休み迎え','長期休み送り','イベント迎え','イベント送り','状態']; const rows=d.children.map(c=>[c.displayName,routeText(c,'pickup','normal'),routeText(c,'dropoff','normal'),routeText(c,'pickup','longHoliday'),routeText(c,'dropoff','longHoliday'),routeText(c,'pickup','event'),routeText(c,'dropoff','event'),c.enabled?'有効':'非表示']); download(`送迎マスタ_${state.month}.csv`,[head,...rows].map(r=>r.map(csvEscape).join(',')).join('\n')); }
+function exportStaff(){ const d=collectMasters(); const head=['担当者名','役割','表示順','運転','添乗','状態']; const rows=d.staff.map(s=>[s.displayName,s.role,s.order,s.canDrive?'可':'不可',s.canRide?'可':'不可',s.enabled?'有効':'非表示']); download(`担当者マスタ_${state.month}.csv`,[head,...rows].map(r=>r.map(csvEscape).join(',')).join('\n')); }
+function parseCsv(text){ const rows=[]; let row=[],cur='',q=false; for(let i=0;i<text.length;i++){const c=text[i],n=text[i+1]; if(q&&c==='"'&&n==='"'){cur+='"';i++;} else if(c==='"'){q=!q;} else if(!q&&c===','){row.push(cur);cur='';} else if(!q&&(c==='\n'||c==='\r')){ if(c==='\r'&&n==='\n')i++; row.push(cur); rows.push(row); row=[]; cur='';} else cur+=c;} row.push(cur); rows.push(row); return rows.filter(r=>r.some(x=>String(x).trim())); }
+function importCsv(kind){ const file=document.getElementById('csvFile'); file.onchange=async()=>{ const text=await file.files[0].text(); const rows=parseCsv(text); const body=rows.slice(1); const d=currentData(); if(kind==='transport'){ d.masters.children=body.map((r,i)=>{const c={id:uid('child'),displayName:r[0],name:r[0],enabled:r[7]!=='非表示'}; c.routes=[...parseRouteText(r[1]).map(x=>({...x,type:'pickup',mode:'normal',enabled:true})),...parseRouteText(r[2]).map(x=>({...x,type:'dropoff',mode:'normal',enabled:true})),...parseRouteText(r[3]).map(x=>({...x,type:'pickup',mode:'longHoliday',enabled:true})),...parseRouteText(r[4]).map(x=>({...x,type:'dropoff',mode:'longHoliday',enabled:true})),...parseRouteText(r[5]).map(x=>({...x,type:'pickup',mode:'event',enabled:true})),...parseRouteText(r[6]).map(x=>({...x,type:'dropoff',mode:'event',enabled:true}))]; return c; }).filter(c=>c.displayName); } else { d.masters.staff=body.map((r,i)=>({id:uid('staff'),displayName:r[0],name:r[0],role:r[1],order:Number(r[2]||999),canDrive:r[3]==='可',canRide:r[4]==='可',enabled:r[5]!=='非表示'})).filter(s=>s.displayName); } state.data=d; state.dirty=true; showNotice('取り込みました','確認後、Driveへマスタ保存を押してください。'); render(); }; file.click(); }
+function PrintView(){ const rows=currentData().schedules.filter(s=>s.date.startsWith(state.month)&&activeSchedule(s)); const names=[...new Set(rows.flatMap(s=>[s.pickupStaff,s.dropoffStaff]).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ja')); return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>印刷</h2><p>A4縦に収まるように調整しています。</p></div><button id="printBtn" class="primary">印刷</button></div><div class="table-wrap"><table><thead><tr><th>担当者</th><th>合計日数</th><th>迎え日数</th><th>送り日数</th><th>迎え児童数</th><th>送り児童数</th><th>確認</th></tr></thead><tbody>${names.map(n=>{const p=rows.filter(s=>s.pickupStaff===n),d=rows.filter(s=>s.dropoffStaff===n); return `<tr><td>${esc(n)}</td><td>${new Set([...p,...d].map(s=>s.date)).size}</td><td>${new Set(p.map(s=>s.date)).size}</td><td>${new Set(d.map(s=>s.date)).size}</td><td>${p.length}</td><td>${d.length}</td><td></td></tr>`}).join('')}</tbody></table></div></section>`; }
+function Settings(){ const s=getSettings(); return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>データ設定</h2><p>Google Drive JSONと接続します。</p></div></div><div class="grid"><label class="field">GAS WebアプリURL<input id="gasUrl" value="${esc(s.gasUrl||'')}"></label><label class="field">認証トークン<input id="appToken" value="${esc(s.appToken||'')}"></label><label class="field">操作者名<input id="operator" value="${esc(s.operator||'')}"></label><label class="field">LINE WORKS Webhook<input id="lineWebhook" value="${esc(s.lineWebhook||'')}"></label></div><div class="toolbar" style="margin-top:12px"><button id="saveSettings" class="primary">設定を保存</button><button id="testConnection">接続確認</button><button id="setupDrive">Drive初期化</button><button id="importFiscal">月別データから年度作成</button><button id="reloadFiscal">年度データ再読込</button></div></section>`; }
+
+
+/* v66: week/month calendar/list rebuild */
+function rowsForDateAnyMonth(date){
+  const month = String(date||'').slice(0,7);
+  if(state.fiscalData && state.fiscalData.months && state.fiscalData.months[month]){
+    return (state.fiscalData.months[month].schedules || []).map(normalizeSchedule).filter(s=>s.date===date);
+  }
+  return currentData().schedules.filter(s=>s.date===date);
+}
+function rowsForMonthAny(month){
+  if(state.fiscalData && state.fiscalData.months && state.fiscalData.months[month]){
+    return (state.fiscalData.months[month].schedules || []).map(normalizeSchedule);
+  }
+  return month===state.month ? currentData().schedules : [];
+}
+function scheduleEvents(rows){
+  const items=[];
+  rows.filter(activeSchedule).forEach(s=>{
+    if(s.pickupTime || s.pickupPlace || s.pickupStaff) items.push({date:s.date,type:'迎え',time:s.pickupTime||'',child:s.child||'',place:s.pickupPlace||'',staff:s.pickupStaff||'',note:s.note||'',status:s.status||'予定'});
+    if(s.dropoffTime || s.dropoffPlace || s.dropoffStaff) items.push({date:s.date,type:'送り',time:s.dropoffTime||'',child:s.child||'',place:s.dropoffPlace||'',staff:s.dropoffStaff||'',note:s.note||'',status:s.status||'予定'});
+  });
+  return items.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.time||'').localeCompare(b.time||'')||a.type.localeCompare(b.type,'ja')||a.child.localeCompare(b.child,'ja'));
+}
+function weekDatesFor(date){
+  const start=new Date(`${date}T00:00:00`);
+  start.setDate(start.getDate()-start.getDay());
+  return Array.from({length:7},(_,i)=>{const x=new Date(start); x.setDate(start.getDate()+i); return ymd(x);});
+}
+function compactEventCard(e){
+  const cls=e.type==='迎え'?'pickup':'dropoff';
+  return `<div class="cal-event ${cls}" title="${esc(`${e.type} ${e.time} ${e.child} ${e.place} ${e.staff}`)}"><div class="cal-time">${esc(e.time||'時刻なし')}</div><div class="cal-main"><span class="type">${esc(e.type)}</span> ${esc(e.child||'未入力')}</div><div class="cal-sub">${esc(e.place||'場所なし')} ／ ${esc(e.staff||'担当なし')}</div>${e.note?`<div class="cal-note">${esc(e.note)}</div>`:''}</div>`;
+}
+function Schedule(){
+  const labels={day:'日表示',week:'週表示',month:'月表示'};
+  const body=state.mode==='day'
+    ? routeTables(rowsForDateAnyMonth(state.date),`${jpDate(state.date)}`)
+    : state.mode==='week'
+      ? WeekView()
+      : MonthView();
+  return `<section class="panel no-print"><div class="panel-head"><div class="panel-title"><h2>予定</h2><p>${labels[state.mode]||'予定'}。週表示は月をまたいでも同じ週の予定を表示します。</p></div></div><div class="segmented schedule-mode-tabs"><button data-mode="day" class="${state.mode==='day'?'primary':''}">日</button><button data-mode="week" class="${state.mode==='week'?'primary':''}">週</button><button data-mode="month" class="${state.mode==='month'?'primary':''}">月</button></div></section>${body}`;
+}
+function WeekView(){
+  const days=weekDatesFor(state.date);
+  const months=[...new Set(days.map(d=>d.slice(0,7)))];
+  const title=`${jpDate(days[0])} 〜 ${jpDate(days[6])}`;
+  const allEvents=scheduleEvents(days.flatMap(day=>rowsForDateAnyMonth(day)));
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>週表示</h2><p>${title}${months.length>1?` ／ ${months.join('・')} の予定を表示`:''}</p></div><span class="badge">${allEvents.length}件</span></div><div class="week-calendar"><div class="week-head-row">${days.map(day=>`<button data-day="${day}" class="week-head ${day===state.date?'selected':''}"><strong>${jpDate(day)}</strong><span>${scheduleEvents(rowsForDateAnyMonth(day)).length}件</span></button>`).join('')}</div><div class="week-body">${days.map(day=>{const events=scheduleEvents(rowsForDateAnyMonth(day)); return `<div class="week-col ${day===state.date?'selected':''}">${events.map(compactEventCard).join('')||'<div class="empty-mini">予定なし</div>'}</div>`;}).join('')}</div></div></section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>週一覧</h2><p>同じ週の予定を一覧で確認できます。</p></div></div>${eventListTable(allEvents)}</section>`;
+}
+function calendarDays(month){
+  const first=new Date(`${month}-01T00:00:00`);
+  const start=new Date(first); start.setDate(1-first.getDay());
+  return Array.from({length:42},(_,i)=>{const x=new Date(start); x.setDate(start.getDate()+i); return ymd(x);});
+}
+function MonthView(){
+  const days=calendarDays(state.month);
+  const monthRows=rowsForMonthAny(state.month).filter(activeSchedule);
+  const monthEvents=scheduleEvents(monthRows);
+  return `<section class="panel"><div class="panel-head"><div class="panel-title"><h2>月表示</h2><p>${state.month} のカレンダーと一覧を表示します。</p></div><span class="badge">${monthEvents.length}件</span></div><div class="month-calendar"><div class="weekday-row">${WEEK.map(w=>`<div>${w}</div>`).join('')}</div><div class="month-grid">${days.map(day=>{const inMonth=day.startsWith(state.month); const events=scheduleEvents(rowsForDateAnyMonth(day)); const shown=events.slice(0,3); return `<button data-day="${day}" class="month-day ${inMonth?'':'outside'} ${day===state.date?'selected':''}"><div class="day-title"><strong>${Number(day.slice(8,10))}</strong><span>${inMonth?`${events.length}件`:day.slice(5,7)+'月'}</span></div>${shown.map(e=>`<div class="mini-event ${e.type==='迎え'?'pickup':'dropoff'}"><span>${esc(e.time||'--:--')}</span>${esc(e.type)} ${esc(e.child)}</div>`).join('')}${events.length>3?`<div class="more-event">ほか ${events.length-3}件</div>`:''}</button>`;}).join('')}</div></div></section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>月一覧</h2><p>カレンダー内の予定を一覧で確認できます。</p></div></div>${eventListTable(monthEvents)}</section>`;
+}
+function eventListTable(events){
+  return `<div class="table-wrap"><table class="compact-table"><thead><tr><th>日付</th><th>区分</th><th>時間</th><th>児童名</th><th>場所</th><th>担当</th><th>備考</th></tr></thead><tbody>${events.map(e=>`<tr><td>${esc(jpDate(e.date))}</td><td>${esc(e.type)}</td><td>${esc(e.time)}</td><td>${esc(e.child)}</td><td>${esc(e.place)}</td><td>${esc(e.staff)}</td><td>${esc(e.note)}</td></tr>`).join('')||'<tr><td colspan="7">予定なし</td></tr>'}</tbody></table></div>`;
 }
 
-function bind(){ document.addEventListener('click', async e=>{ const t=e.target.closest('[data-view],[data-refresh],[data-mode],[data-staff-mode],[data-today],[data-add],[data-edit],[data-save-schedule],[data-close-modal],[data-close-notice],[data-save],[data-delete-selected],[data-next-preview],[data-next-create],[data-test],[data-setup-drive],[data-save-settings],[data-import-fiscal],[data-export],[data-add-child],[data-add-staff],[data-delete-schedule],[data-jump-date]'); if(!t)return; if(t.dataset.view){ state.view=t.dataset.view; location.hash=state.view; render(); } if(t.dataset.refresh!==undefined) await loadFiscal(true); if(t.dataset.mode){ state.mode=t.dataset.mode; render(); } if(t.dataset.staffMode){ state.staffView.mode=t.dataset.staffMode; render(); } if(t.dataset.today!==undefined){ state.date=TODAY; state.month=TODAY_YM; render(); } if(t.dataset.add){ openScheduleModal(t.dataset.add,t.dataset.addDate||state.date,''); } if(t.dataset.edit){ const s=findSchedule(t.dataset.edit); openScheduleModal('both',s?.date||state.date,t.dataset.edit); } if(t.dataset.closeModal!==undefined){ state.modal=null; renderModal(); } if(t.dataset.closeNotice!==undefined){ state.notice=null; renderNotice(); } if(t.dataset.saveSchedule!==undefined) await saveModalSchedule(); if(t.dataset.deleteSchedule) await deleteSchedule(t.dataset.deleteSchedule); if(t.dataset.save!==undefined) await saveFiscal('保存しました'); if(t.dataset.deleteSelected!==undefined){ schedulesOfMonth(state.month).filter(s=>state.selectedDeletes.has(s.id)).forEach(s=>{ const list=schedulesOfMonth(s.date.slice(0,7)); const i=list.findIndex(x=>x.id===s.id); if(i>=0) list.splice(i,1); }); state.selectedDeletes.clear(); await saveFiscal('削除しました'); } if(t.dataset.nextPreview!==undefined){ createNextPreview(); render(); } if(t.dataset.nextCreate!==undefined) await createNext(); if(t.dataset.test!==undefined){ try{await api.ping(); showNotice('接続OK','GASに接続できました。','ok');}catch(err){showNotice('接続NG',err.message,'err');} } if(t.dataset.setupDrive!==undefined){ try{await api.setupDrive(); showNotice('初期設定OK','Driveフォルダを確認しました。','ok');}catch(err){showNotice('失敗',err.message,'err');} } if(t.dataset.importFiscal!==undefined){ try{const data=await api.importFiscalFromMonths(state.fiscalYear); state.fiscal=normalizeFiscal(data); writeCache(state.fiscalYear,state.fiscal); render(); showNotice('作成しました','月別データから年度データを作成しました。','ok');}catch(err){showNotice('失敗',err.message,'err');} } if(t.dataset.saveSettings!==undefined){ const s=settings(); document.querySelectorAll('[data-setting]').forEach(el=>s[el.dataset.setting]=el.value); saveSettings(s); showNotice('保存しました','データ設定を保存しました。','ok'); } if(t.dataset.export) exportCsv(t.dataset.export); if(t.dataset.addChild!==undefined){ state.fiscal.masters.children.push({id:uid('child'),displayName:'',name:'',enabled:true,routes:[]}); render(); } if(t.dataset.addStaff!==undefined){ state.fiscal.masters.staff.push({id:uid('staff'),displayName:'',name:'',enabled:true,order:(state.fiscal.masters.staff||[]).length+1}); render(); } if(t.dataset.jumpDate){ state.date=t.dataset.jumpDate; state.month=state.date.slice(0,7); state.mode='day'; state.view='schedule'; render(); } });
-  document.addEventListener('change', e=>{ const el=e.target; if(el.matches('[data-fiscal]')){ state.fiscalYear=Number(el.value); state.month=fiscalMonths(state.fiscalYear)[0]; state.date=`${state.month}-01`; loadFiscal(false); } if(el.matches('[data-month]')){ state.month=el.value; state.date=`${state.month}-01`; state.fiscalYear=fiscalYearFromYm(state.month); if(!state.fiscal.months[state.month]) ensureFiscalMonth(state.month); render(); } if(el.matches('[data-date]')){ state.date=el.value; state.month=el.value.slice(0,7); render(); } if(el.matches('[data-staff-view]')){ state.staffView.staff=el.value; render(); } if(el.matches('[data-staff-mode]')){ state.staffView.mode=el.dataset.staffMode; render(); } if(el.matches('[data-staff-date]')){ state.staffView.date=el.value; render(); } if(el.matches('[data-filter-status]')){ state.filters.status=el.value; render(); } if(el.matches('[data-filter-date]')){ state.filters.date=el.value; render(); } if(el.matches('[data-row-check]')){ el.checked?state.selectedDeletes.add(el.dataset.rowCheck):state.selectedDeletes.delete(el.dataset.rowCheck); } if(el.matches('[data-check-all]')){ document.querySelectorAll('[data-row-check]').forEach(c=>{ c.checked=el.checked; c.checked?state.selectedDeletes.add(c.dataset.rowCheck):state.selectedDeletes.delete(c.dataset.rowCheck); }); } if(el.matches('[data-cell]')){ const s=findSchedule(el.dataset.id); if(s){ s[el.dataset.cell]=el.value; if(el.dataset.cell==='date'){ s.weekday=weekday(el.value); } } } if(el.matches('[data-next-source]')) state.next.source=el.value; if(el.matches('[data-next-target]')) state.next.target=el.value; if(el.matches('[data-next-long-start]')) state.next.longStart=el.value; if(el.matches('[data-next-long-end]')) state.next.longEnd=el.value; if(el.matches('[data-closed-day]')) state.next.closedDays[Number(el.dataset.closedDay)]=el.value; if(el.matches('[data-closed-start]')) state.next.closedPeriods[Number(el.dataset.closedStart)]={...(state.next.closedPeriods[Number(el.dataset.closedStart)]||{}),start:el.value}; if(el.matches('[data-closed-end]')) state.next.closedPeriods[Number(el.dataset.closedEnd)]={...(state.next.closedPeriods[Number(el.dataset.closedEnd)]||{}),end:el.value}; if(el.matches('[data-master-child-name]')){ const c=state.fiscal.masters.children.find(x=>x.id===el.dataset.masterChildName); if(c){c.displayName=el.value;c.name=el.value;} } if(el.matches('[data-master-child-enabled]')){ const c=state.fiscal.masters.children.find(x=>x.id===el.dataset.masterChildEnabled); if(c)c.enabled=el.value==='true'; } if(el.matches('[data-master-staff-name]')){ const s=state.fiscal.masters.staff.find(x=>x.id===el.dataset.masterStaffName); if(s){s.displayName=el.value;s.name=el.value;} } if(el.matches('[data-master-staff-order]')){ const s=state.fiscal.masters.staff.find(x=>x.id===el.dataset.masterStaffOrder); if(s)s.order=Number(el.value||999); } if(el.matches('[data-master-staff-enabled]')){ const s=state.fiscal.masters.staff.find(x=>x.id===el.dataset.masterStaffEnabled); if(s)s.enabled=el.value==='true'; } if(el.matches('[data-import]') && el.files && el.files[0]){ importCsvFile(el.files[0]); el.value=''; } });
-  document.addEventListener('input', e=>{ const el=e.target; if(el.matches('[data-filter-child]')){ state.filters.child=el.value; render(); } if(el.matches('[data-filter-staff]')){ state.filters.staff=el.value; render(); } });
+function Body(){ return state.view==='dashboard'?Dashboard():state.view==='schedule'?Schedule():state.view==='staff'?StaffView():state.view==='changes'?Changes():state.view==='next'?NextMonth():state.view==='masters'?Masters():state.view==='print'?PrintView():Settings(); }
+function render(){ app.innerHTML=Layout(Body()); bind(); renderNotice(); }
+function bind(){
+  document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{state.view=b.dataset.view; location.hash=state.view; render();});
+  document.getElementById('mobileViewSelect')?.addEventListener('change',e=>{state.view=e.target.value; location.hash=state.view; render();});
+  document.getElementById('reloadBtn')?.addEventListener('click',()=>loadMonth(state.month,{force:true}));
+  document.getElementById('reloadBtn2')?.addEventListener('click',()=>loadMonth(state.month,{force:true}));
+  document.getElementById('autoBtn')?.addEventListener('click',()=>{state.autoRefresh=!state.autoRefresh; localStorage.setItem('transport.autoRefresh.v62',state.autoRefresh?'1':'0'); setupAuto(); render();});
+  document.getElementById('prevMonth')?.addEventListener('click',()=>loadMonth(addMonths(state.month,-1),{force:false}));
+  document.getElementById('nextMonth')?.addEventListener('click',()=>loadMonth(addMonths(state.month,1),{force:false}));
+  document.getElementById('applyMonth')?.addEventListener('click',()=>loadMonth(document.getElementById('monthInput').value,{force:false}));
+  document.getElementById('applyFiscal')?.addEventListener('click',()=>loadFiscal(Number(document.getElementById('fiscalInput').value),{force:true,month:fiscalMonths(Number(document.getElementById('fiscalInput').value))[0]}));
+  document.getElementById('dateInput')?.addEventListener('change',e=>{state.date=e.target.value; state.month=e.target.value.slice(0,7); loadMonth(state.month,{force:false,silent:true});});
+  document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{state.mode=b.dataset.mode; render();});
+  document.querySelectorAll('[data-day]').forEach(b=>b.onclick=()=>{state.date=b.dataset.day; state.month=state.date.slice(0,7); state.mode='day'; state.view='schedule'; loadMonth(state.month,{force:false,silent:true});});
+  document.querySelectorAll('[data-status]').forEach(b=>b.onclick=()=>{state.filters.status=b.dataset.status; render();});
+  ['filterChild','filterStaff','filterRange','filterDate'].forEach(id=>document.getElementById(id)?.addEventListener('input',e=>{const map={filterChild:'child',filterStaff:'staff',filterRange:'range',filterDate:'date'}; state.filters[map[id]]=e.target.value; render();}));
+  document.getElementById('staffPageStaff')?.addEventListener('change',e=>{state.staffPage.staff=e.target.value; render();});
+  document.getElementById('staffDate')?.addEventListener('change',e=>{state.date=e.target.value||state.date; if(state.date) loadMonth(state.date.slice(0,7),{force:false}); else render();});
+  document.getElementById('staffMonthInput')?.addEventListener('change',e=>{loadMonth(e.target.value,{force:false});});
+  document.querySelectorAll('[data-staff-range]').forEach(b=>b.onclick=()=>{state.staffPage.range=b.dataset.staffRange; render();});
+  document.getElementById('selectVisible')?.addEventListener('click',()=>document.querySelectorAll('#changeTable [data-del]').forEach(x=>x.checked=true));
+  document.getElementById('clearChecked')?.addEventListener('click',()=>document.querySelectorAll('#changeTable [data-del]').forEach(x=>x.checked=false));
+  document.getElementById('deleteChecked')?.addEventListener('click',()=>{const n=[...document.querySelectorAll('#changeTable [data-del]:checked')].length; showNotice('削除対象にしました',`${n}件を削除対象にしました。最後に保存してください。`);});
+  document.getElementById('saveSchedules')?.addEventListener('click',()=>{collectScheduleRows(); saveCurrentMonth('保存しました');});
+  document.getElementById('addFormBtn')?.addEventListener('click',()=>{state.addForms.push({id:uid('add')}); render();});
+  document.querySelectorAll('[data-remove-add]').forEach(b=>b.onclick=()=>{state.addForms=state.addForms.filter(x=>x.id!==b.dataset.removeAdd); render();});
+  document.getElementById('addSchedules')?.addEventListener('click',addSchedulesFromForms);
+  document.getElementById('longAll')?.addEventListener('click',()=>{const m=document.getElementById('targetMonth').value; document.getElementById('longStart0').value=`${m}-01`; document.getElementById('longEnd0').value=`${m}-${pad(daysInMonth(m))}`;});
+  document.getElementById('clearLong')?.addEventListener('click',()=>{document.getElementById('longStart0').value='';document.getElementById('longEnd0').value='';});
+  document.getElementById('previewNext')?.addEventListener('click',buildNextPreview);
+  document.getElementById('createNext')?.addEventListener('click',createNextMonth);
+  document.getElementById('addChild')?.addEventListener('click',()=>{const d=collectMasters(); d.children.push({id:uid('child'),displayName:'',name:'',enabled:true,routes:[]}); render();});
+  document.getElementById('addStaff')?.addEventListener('click',()=>{const d=collectMasters(); d.staff.push({id:uid('staff'),displayName:'',name:'',enabled:true,order:999,canDrive:false,canRide:true}); render();});
+  document.querySelectorAll('[data-copy-staff]').forEach(b=>b.onclick=()=>{const d=collectMasters(); const s=d.staff.find(x=>x.id===b.dataset.copyStaff); if(s)d.staff.push({...s,id:uid('staff'),displayName:`${s.displayName} コピー`}); render();});
+  document.querySelectorAll('[data-hide-staff]').forEach(b=>b.onclick=()=>{const d=collectMasters(); const s=d.staff.find(x=>x.id===b.dataset.hideStaff); if(s)s.enabled=false; render();});
+  document.getElementById('saveMastersBtn')?.addEventListener('click',()=>{collectMasters(); saveMasters();});
+  document.getElementById('exportTransport')?.addEventListener('click',exportTransport);
+  document.getElementById('exportStaff')?.addEventListener('click',exportStaff);
+  document.getElementById('importTransportBtn')?.addEventListener('click',()=>importCsv('transport'));
+  document.getElementById('importStaffBtn')?.addEventListener('click',()=>importCsv('staff'));
+  document.getElementById('printBtn')?.addEventListener('click',()=>window.print());
+  document.getElementById('saveSettings')?.addEventListener('click',()=>{saveSettings({gasUrl:document.getElementById('gasUrl').value.trim(),appToken:document.getElementById('appToken').value.trim(),operator:document.getElementById('operator').value.trim(),lineWebhook:document.getElementById('lineWebhook').value.trim()}); showNotice('保存しました','データ設定を保存しました。');});
+  document.getElementById('testConnection')?.addEventListener('click',async()=>{try{await api.ping();showNotice('接続できました','GASと通信できました。')}catch(e){showNotice('接続できません',e.message,'bad')}});
+  document.getElementById('setupDrive')?.addEventListener('click',async()=>{try{await api.setupDrive();showNotice('完了しました','Drive初期化を実行しました。')}catch(e){showNotice('実行できません',e.message,'bad')}});
+  document.getElementById('importFiscal')?.addEventListener('click',importCurrentFiscal);
+  document.getElementById('reloadFiscal')?.addEventListener('click',()=>loadFiscal(state.fiscalYear,{force:true,month:state.month}));
 }
+let autoTimer=null; function setupAuto(){ clearInterval(autoTimer); if(state.autoRefresh) autoTimer=setInterval(()=>{ if(!state.dirty) loadMonth(state.month,{force:true,silent:true}); },60000); }
+state.autoRefresh = localStorage.getItem('transport.autoRefresh.v62') === '1';
+window.addEventListener('hashchange',()=>{state.view=(location.hash||'#dashboard').replace('#',''); render();});
+render(); loadFiscal(state.fiscalYear,{force:false,silent:true,month:state.month}); setupAuto();
 
-bind();
-render();
-loadFiscal(false);
+/* v68: PC schedule tab design unified */
+function Schedule(){
+  const labels={day:'日表示',week:'週表示',month:'月表示'};
+  const body=state.mode==='day'
+    ? routeTables(rowsForDateAnyMonth(state.date),`${jpDate(state.date)}`)
+    : state.mode==='week'
+      ? WeekView()
+      : MonthView();
+  return `<section class="panel no-print schedule-switch-panel"><div class="schedule-switch-head"><div><h2>予定</h2><p>${labels[state.mode]||'予定'}。週表示は月をまたいでも表示します。</p></div><div class="schedule-switch"><button data-mode="day" class="${state.mode==='day'?'primary':''}">日</button><button data-mode="week" class="${state.mode==='week'?'primary':''}">週</button><button data-mode="month" class="${state.mode==='month'?'primary':''}">月</button></div></div></section>${body}`;
+}
